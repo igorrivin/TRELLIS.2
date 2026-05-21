@@ -1,6 +1,7 @@
 import gradio as gr
 
 import os
+import argparse
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from datetime import datetime
@@ -616,6 +617,12 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
 
 # Launch the Gradio app
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the TRELLIS.2 Gradio app.")
+    parser.add_argument("--server-name", default=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"))
+    parser.add_argument("--server-port", type=int, default=int(os.environ["GRADIO_SERVER_PORT"]) if os.environ.get("GRADIO_SERVER_PORT") else None)
+    parser.add_argument("--share", action="store_true", default=os.environ.get("GRADIO_SHARE", "").lower() in {"1", "true", "yes"})
+    args = parser.parse_args()
+
     os.makedirs(TMP_DIR, exist_ok=True)
 
     # Construct ui components
@@ -642,4 +649,4 @@ if __name__ == "__main__":
         )),
     }
     
-    demo.launch(css=css, head=head)
+    demo.launch(css=css, head=head, server_name=args.server_name, server_port=args.server_port, share=args.share)

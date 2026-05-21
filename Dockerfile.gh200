@@ -1,0 +1,72 @@
+FROM nvcr.io/nvidia/pytorch:24.12-py3
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CUDA_HOME=/usr/local/cuda \
+    TORCH_CUDA_ARCH_LIST=9.0 \
+    MAX_JOBS=16 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    OPENCV_IO_ENABLE_OPENEXR=1 \
+    PYTHONPATH=/opt/TRELLIS.2
+
+WORKDIR /opt/TRELLIS.2
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    libegl-dev \
+    libegl1 \
+    libgl-dev \
+    libgl1 \
+    libglib2.0-0 \
+    libgles-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libsm6 \
+    libx11-dev \
+    libxext6 \
+    libxrender1 \
+    ninja-build \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --upgrade "pip<26" "setuptools<82" "wheel<0.47" "packaging<=24.2" && \
+    python -m pip install \
+    easydict \
+    gradio==6.0.1 \
+    imageio \
+    imageio-ffmpeg \
+    kornia \
+    lpips \
+    numpy==1.26.4 \
+    opencv-python-headless==4.10.0.84 \
+    pandas \
+    tensorboard \
+    timm \
+    tqdm \
+    "transformers>=4.57,<5" \
+    trimesh \
+    zstandard \
+    git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
+
+RUN mkdir -p /tmp/extensions && \
+    git clone -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast && \
+    python -m pip install /tmp/extensions/nvdiffrast --no-build-isolation && \
+    git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git /tmp/extensions/nvdiffrec && \
+    python -m pip install /tmp/extensions/nvdiffrec --no-build-isolation && \
+    git clone --recursive https://github.com/JeffreyXiang/CuMesh.git /tmp/extensions/CuMesh && \
+    python -m pip install /tmp/extensions/CuMesh --no-build-isolation && \
+    git clone --recursive https://github.com/JeffreyXiang/FlexGEMM.git /tmp/extensions/FlexGEMM && \
+    python -m pip install /tmp/extensions/FlexGEMM --no-build-isolation
+
+COPY o-voxel /opt/TRELLIS.2/o-voxel
+RUN python -m pip install /opt/TRELLIS.2/o-voxel --no-build-isolation
+
+COPY . /opt/TRELLIS.2
+
+COPY docker/trellis2_compat.py /usr/local/lib/python3.12/dist-packages/trellis2_compat.py
+COPY docker/trellis2_compat.pth /usr/local/lib/python3.12/dist-packages/trellis2_compat.pth
+RUN python -m pip install --no-deps transformers==4.57.6
+
+CMD ["/bin/bash"]
