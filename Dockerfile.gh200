@@ -42,6 +42,7 @@ RUN python -m pip install --upgrade "pip<26" "setuptools<82" "wheel<0.47" "packa
     numpy==1.26.4 \
     opencv-python-headless==4.10.0.84 \
     pandas \
+    requests \
     tensorboard \
     timm \
     tqdm \

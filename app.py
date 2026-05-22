@@ -13,15 +13,17 @@ import numpy as np
 from PIL import Image
 import base64
 import io
-from trellis2.modules.sparse import SparseTensor
-from trellis2.pipelines import Trellis2ImageTo3DPipeline
-from trellis2.renderers import EnvMap
-from trellis2.utils import render_utils
-import o_voxel
+from rodin_api import (
+    RodinError,
+    generate_image_to_3d as generate_rodin_image_to_3d,
+    get_rodin_api_key,
+)
 
 
 MAX_SEED = np.iinfo(np.int32).max
 TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tmp')
+TRELLIS_BACKEND = "TRELLIS.2 (local)"
+RODIN_BACKEND = "Rodin Gen-2 (Hyper3D API)"
 MODES = [
     {"name": "Normal", "icon": "assets/app/normal.png", "render_key": "normal"},
     {"name": "Clay render", "icon": "assets/app/clay.png", "render_key": "clay"},
@@ -33,6 +35,8 @@ MODES = [
 STEPS = 8
 DEFAULT_MODE = 3
 DEFAULT_STEP = 3
+pipeline = None
+envmap = None
 
 
 css = """
@@ -291,6 +295,35 @@ empty_html = f"""
 """
 
 
+def get_trellis_pipeline():
+    global pipeline, envmap
+    if pipeline is None:
+        from trellis2.pipelines import Trellis2ImageTo3DPipeline
+
+        pipeline = Trellis2ImageTo3DPipeline.from_pretrained('microsoft/TRELLIS.2-4B')
+        pipeline.cuda()
+
+    if envmap is None:
+        from trellis2.renderers import EnvMap
+
+        envmap = {
+            'forest': EnvMap(torch.tensor(
+                cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
+                dtype=torch.float32, device='cuda'
+            )),
+            'sunset': EnvMap(torch.tensor(
+                cv2.cvtColor(cv2.imread('assets/hdri/sunset.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
+                dtype=torch.float32, device='cuda'
+            )),
+            'courtyard': EnvMap(torch.tensor(
+                cv2.cvtColor(cv2.imread('assets/hdri/courtyard.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
+                dtype=torch.float32, device='cuda'
+            )),
+        }
+
+    return pipeline, envmap
+
+
 def image_to_base64(image):
     buffered = io.BytesIO()
     image = image.convert("RGB")
@@ -306,7 +339,7 @@ def start_session(req: gr.Request):
     
 def end_session(req: gr.Request):
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
-    shutil.rmtree(user_dir)
+    shutil.rmtree(user_dir, ignore_errors=True)
 
 
 def preprocess_image(image: Image.Image) -> Image.Image:
@@ -319,13 +352,15 @@ def preprocess_image(image: Image.Image) -> Image.Image:
     Returns:
         Image.Image: The preprocessed image.
     """
+    pipeline, _ = get_trellis_pipeline()
     processed_image = pipeline.preprocess_image(image)
     return processed_image
 
 
-def pack_state(latents: Tuple[SparseTensor, SparseTensor, int]) -> dict:
+def pack_state(latents: tuple) -> dict:
     shape_slat, tex_slat, res = latents
     return {
+        'backend': 'trellis',
         'shape_slat_feats': shape_slat.feats.cpu().numpy(),
         'tex_slat_feats': tex_slat.feats.cpu().numpy(),
         'coords': shape_slat.coords.cpu().numpy(),
@@ -333,7 +368,9 @@ def pack_state(latents: Tuple[SparseTensor, SparseTensor, int]) -> dict:
     }
     
     
-def unpack_state(state: dict) -> Tuple[SparseTensor, SparseTensor, int]:
+def unpack_state(state: dict) -> tuple:
+    from trellis2.modules.sparse import SparseTensor
+
     shape_slat = SparseTensor(
         feats=torch.from_numpy(state['shape_slat_feats']).cuda(),
         coords=torch.from_numpy(state['coords']).cuda(),
@@ -349,10 +386,41 @@ def get_seed(randomize_seed: bool, seed: int) -> int:
     return np.random.randint(0, MAX_SEED) if randomize_seed else seed
 
 
+def rodin_result_html(preview_path: Optional[str], task_uuid: str) -> str:
+    if preview_path:
+        try:
+            preview_image = Image.open(preview_path)
+            preview_src = image_to_base64(preview_image)
+            preview_markup = f"""
+                <img class="previewer-main-image visible"
+                     src="{preview_src}"
+                     loading="eager"
+                     style="display:block; max-height:100%; object-fit:contain;">
+            """
+        except Exception:
+            preview_markup = f"<p>Rodin task {task_uuid} completed.</p>"
+    else:
+        preview_markup = f"<p>Rodin task {task_uuid} completed.</p>"
+
+    return f"""
+    <div class="previewer-container">
+        <div class="display-row">
+            {preview_markup}
+        </div>
+    </div>
+    """
+
+
 def image_to_3d(
     image: Image.Image,
+    backend: str,
     seed: int,
     resolution: str,
+    rodin_prompt: str,
+    rodin_quality: str,
+    rodin_mesh_mode: str,
+    rodin_use_original_alpha: bool,
+    rodin_hd_texture: bool,
     ss_guidance_strength: float,
     ss_guidance_rescale: float,
     ss_sampling_steps: int,
@@ -368,11 +436,48 @@ def image_to_3d(
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> str:
+    if image is None:
+        raise gr.Error("Upload an image first.")
+
+    if backend == RODIN_BACKEND:
+        api_key = get_rodin_api_key()
+        if not api_key:
+            raise gr.Error("Set HYPER3D_API_KEY or RODIN_API_KEY before using Rodin.")
+
+        user_dir = os.path.join(TMP_DIR, str(req.session_hash))
+        try:
+            result = generate_rodin_image_to_3d(
+                image,
+                user_dir,
+                api_key,
+                prompt=rodin_prompt,
+                seed=seed,
+                quality=rodin_quality,
+                mesh_mode=rodin_mesh_mode,
+                use_original_alpha=rodin_use_original_alpha,
+                hd_texture=rodin_hd_texture,
+                progress=progress,
+            )
+        except RodinError as exc:
+            raise gr.Error(str(exc)) from exc
+
+        state = {
+            'backend': 'rodin',
+            'task_uuid': result.task_uuid,
+            'subscription_key': result.subscription_key,
+            'glb_path': result.glb_path,
+            'preview_path': result.preview_path,
+            'downloaded_files': result.downloaded_files,
+        }
+        return state, rodin_result_html(result.preview_path, result.task_uuid)
+
+    trellis_pipeline, trellis_envmap = get_trellis_pipeline()
+
     # --- Sampling ---
-    outputs, latents = pipeline.run(
+    outputs, latents = trellis_pipeline.run(
         image,
         seed=seed,
-        preprocess_image=False,
+        preprocess_image=True,
         sparse_structure_sampler_params={
             "steps": ss_sampling_steps,
             "guidance_strength": ss_guidance_strength,
@@ -400,7 +505,9 @@ def image_to_3d(
     )
     mesh = outputs[0]
     mesh.simplify(16777216) # nvdiffrast limit
-    images = render_utils.render_snapshot(mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=envmap)
+    from trellis2.utils import render_utils
+
+    images = render_utils.render_snapshot(mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=trellis_envmap)
     state = pack_state(latents)
     torch.cuda.empty_cache()
     
@@ -488,15 +595,27 @@ def extract_glb(
     Returns:
         str: The path to the extracted GLB file.
     """
+    if not state:
+        raise gr.Error("Generate a 3D asset first.")
+
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
+    if state.get('backend') == 'rodin':
+        glb_path = state.get('glb_path')
+        if not glb_path or not os.path.exists(glb_path):
+            raise gr.Error("Rodin GLB is missing. Generate again.")
+        return glb_path, glb_path
+
+    trellis_pipeline, _ = get_trellis_pipeline()
     shape_slat, tex_slat, res = unpack_state(state)
-    mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
+    mesh = trellis_pipeline.decode_latent(shape_slat, tex_slat, res)[0]
+    import o_voxel
+
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices,
         faces=mesh.faces,
         attr_volume=mesh.attrs,
         coords=mesh.coords,
-        attr_layout=pipeline.pbr_attr_layout,
+        attr_layout=trellis_pipeline.pbr_attr_layout,
         grid_size=res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
         decimation_target=decimation_target,
@@ -517,7 +636,7 @@ def extract_glb(
 
 with gr.Blocks(delete_cache=(600, 600)) as demo:
     gr.Markdown("""
-    ## Image to 3D Asset with [TRELLIS.2](https://microsoft.github.io/TRELLIS.2)
+    ## Image to 3D Asset with [TRELLIS.2](https://microsoft.github.io/TRELLIS.2) or Rodin Gen-2
     * Upload an image (preferably with an alpha-masked foreground object) and click Generate to create a 3D asset.
     * Click Extract GLB to export and download the generated GLB file if you're satisfied with the result. Otherwise, try another time.
     """)
@@ -525,12 +644,20 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     with gr.Row():
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
+            backend = gr.Radio([TRELLIS_BACKEND, RODIN_BACKEND], label="Backend", value=TRELLIS_BACKEND)
             
             resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
+
+            with gr.Accordion(label="Rodin Settings", open=False):
+                rodin_prompt = gr.Textbox(label="Prompt", lines=2, placeholder="Optional image guidance prompt")
+                rodin_quality = gr.Radio(["medium", "high", "low", "extra-low"], label="Quality", value="medium")
+                rodin_mesh_mode = gr.Radio(["Quad", "Raw"], label="Mesh Mode", value="Quad")
+                rodin_use_original_alpha = gr.Checkbox(label="Use Original Alpha", value=True)
+                rodin_hd_texture = gr.Checkbox(label="HD Texture", value=False)
             
             generate_btn = gr.Button("Generate")
                 
@@ -570,9 +697,6 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     for image in os.listdir("assets/example_image")
                 ],
                 inputs=[image_prompt],
-                fn=preprocess_image,
-                outputs=[image_prompt],
-                run_on_click=True,
                 examples_per_page=18,
             )
                     
@@ -583,12 +707,6 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     demo.load(start_session)
     demo.unload(end_session)
     
-    image_prompt.upload(
-        preprocess_image,
-        inputs=[image_prompt],
-        outputs=[image_prompt],
-    )
-
     generate_btn.click(
         get_seed,
         inputs=[randomize_seed, seed],
@@ -598,7 +716,8 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     ).then(
         image_to_3d,
         inputs=[
-            image_prompt, seed, resolution,
+            image_prompt, backend, seed, resolution,
+            rodin_prompt, rodin_quality, rodin_mesh_mode, rodin_use_original_alpha, rodin_hd_texture,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
@@ -630,23 +749,5 @@ if __name__ == "__main__":
     for i in range(len(MODES)):
         icon = Image.open(MODES[i]['icon'])
         MODES[i]['icon_base64'] = image_to_base64(icon)
-
-    pipeline = Trellis2ImageTo3DPipeline.from_pretrained('microsoft/TRELLIS.2-4B')
-    pipeline.cuda()
-    
-    envmap = {
-        'forest': EnvMap(torch.tensor(
-            cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
-            dtype=torch.float32, device='cuda'
-        )),
-        'sunset': EnvMap(torch.tensor(
-            cv2.cvtColor(cv2.imread('assets/hdri/sunset.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
-            dtype=torch.float32, device='cuda'
-        )),
-        'courtyard': EnvMap(torch.tensor(
-            cv2.cvtColor(cv2.imread('assets/hdri/courtyard.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
-            dtype=torch.float32, device='cuda'
-        )),
-    }
     
     demo.launch(css=css, head=head, server_name=args.server_name, server_port=args.server_port, share=args.share)
