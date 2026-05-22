@@ -37,6 +37,7 @@ DEFAULT_MODE = 3
 DEFAULT_STEP = 3
 pipeline = None
 envmap = None
+rembg_model = None
 
 
 css = """
@@ -324,6 +325,18 @@ def get_trellis_pipeline():
     return pipeline, envmap
 
 
+def get_rembg_model():
+    global rembg_model
+    if pipeline is not None and getattr(pipeline, "rembg_model", None) is not None:
+        return pipeline.rembg_model
+
+    if rembg_model is None:
+        from trellis2.pipelines.rembg import BiRefNet
+
+        rembg_model = BiRefNet()
+    return rembg_model
+
+
 def image_to_base64(image):
     buffered = io.BytesIO()
     image = image.convert("RGB")
@@ -355,6 +368,67 @@ def preprocess_image(image: Image.Image) -> Image.Image:
     pipeline, _ = get_trellis_pipeline()
     processed_image = pipeline.preprocess_image(image)
     return processed_image
+
+
+def has_alpha_mask(image: Image.Image) -> bool:
+    if image.mode != 'RGBA':
+        return False
+    alpha = np.array(image)[:, :, 3]
+    return not np.all(alpha == 255)
+
+
+def crop_to_alpha(image: Image.Image) -> Image.Image:
+    image = image.convert('RGBA')
+    alpha = np.array(image)[:, :, 3]
+    bbox_pixels = np.argwhere(alpha > 0.8 * 255)
+    if len(bbox_pixels) == 0:
+        return image
+
+    left = int(np.min(bbox_pixels[:, 1]))
+    top = int(np.min(bbox_pixels[:, 0]))
+    right = int(np.max(bbox_pixels[:, 1])) + 1
+    bottom = int(np.max(bbox_pixels[:, 0])) + 1
+    center = (left + right) / 2, (top + bottom) / 2
+    size = max(right - left, bottom - top)
+    bbox = (
+        int(center[0] - size // 2),
+        int(center[1] - size // 2),
+        int(center[0] + (size + 1) // 2),
+        int(center[1] + (size + 1) // 2),
+    )
+    return image.crop(bbox)
+
+
+def prepare_rodin_image(
+    image: Image.Image,
+    remove_background: bool,
+    progress=gr.Progress(track_tqdm=True),
+) -> Image.Image:
+    if not remove_background:
+        return image
+
+    max_size = max(image.size)
+    scale = min(1, 1024 / max_size)
+    if scale < 1:
+        image = image.resize((int(image.width * scale), int(image.height * scale)), Image.Resampling.LANCZOS)
+
+    if has_alpha_mask(image):
+        return crop_to_alpha(image)
+
+    if progress is not None:
+        try:
+            progress(0.01, desc="Removing background")
+        except TypeError:
+            progress(0.01)
+
+    model = get_rembg_model()
+    model.to("cuda")
+    try:
+        output = model(image.convert('RGB'))
+    finally:
+        if pipeline is None and hasattr(model, "cpu"):
+            model.cpu()
+    return crop_to_alpha(output)
 
 
 def pack_state(latents: tuple) -> dict:
@@ -419,6 +493,7 @@ def image_to_3d(
     rodin_prompt: str,
     rodin_quality: str,
     rodin_mesh_mode: str,
+    rodin_remove_background: bool,
     rodin_use_original_alpha: bool,
     rodin_hd_texture: bool,
     ss_guidance_strength: float,
@@ -445,9 +520,14 @@ def image_to_3d(
             raise gr.Error("Set HYPER3D_API_KEY or RODIN_API_KEY before using Rodin.")
 
         user_dir = os.path.join(TMP_DIR, str(req.session_hash))
+        rodin_image = prepare_rodin_image(
+            image,
+            rodin_remove_background,
+            progress=progress,
+        )
         try:
             result = generate_rodin_image_to_3d(
-                image,
+                rodin_image,
                 user_dir,
                 api_key,
                 prompt=rodin_prompt,
@@ -656,6 +736,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 rodin_prompt = gr.Textbox(label="Prompt", lines=2, placeholder="Optional image guidance prompt")
                 rodin_quality = gr.Radio(["medium", "high", "low", "extra-low"], label="Quality", value="medium")
                 rodin_mesh_mode = gr.Radio(["Quad", "Raw"], label="Mesh Mode", value="Quad")
+                rodin_remove_background = gr.Checkbox(label="Remove Background", value=True)
                 rodin_use_original_alpha = gr.Checkbox(label="Use Original Alpha", value=True)
                 rodin_hd_texture = gr.Checkbox(label="HD Texture", value=False)
             
@@ -721,7 +802,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         image_to_3d,
         inputs=[
             image_prompt, backend, seed, resolution,
-            rodin_prompt, rodin_quality, rodin_mesh_mode, rodin_use_original_alpha, rodin_hd_texture,
+            rodin_prompt, rodin_quality, rodin_mesh_mode, rodin_remove_background, rodin_use_original_alpha, rodin_hd_texture,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
