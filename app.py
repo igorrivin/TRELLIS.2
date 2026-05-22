@@ -435,7 +435,7 @@ def image_to_3d(
     tex_slat_rescale_t: float,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
-) -> str:
+) -> tuple:
     if image is None:
         raise gr.Error("Upload an image first.")
 
@@ -469,7 +469,7 @@ def image_to_3d(
             'preview_path': result.preview_path,
             'downloaded_files': result.downloaded_files,
         }
-        return state, rodin_result_html(result.preview_path, result.task_uuid)
+        return state, rodin_result_html(result.preview_path, result.task_uuid), result.glb_path
 
     trellis_pipeline, trellis_envmap = get_trellis_pipeline()
 
@@ -574,7 +574,7 @@ def image_to_3d(
     </div>
     """
     
-    return state, full_html
+    return state, full_html, None
 
 
 def extract_glb(
@@ -583,7 +583,7 @@ def extract_glb(
     texture_size: int,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     """
     Extract a GLB file from the 3D model.
 
@@ -603,7 +603,7 @@ def extract_glb(
         glb_path = state.get('glb_path')
         if not glb_path or not os.path.exists(glb_path):
             raise gr.Error("Rodin GLB is missing. Generate again.")
-        return glb_path, glb_path
+        return glb_path, glb_path, glb_path
 
     trellis_pipeline, _ = get_trellis_pipeline()
     shape_slat, tex_slat, res = unpack_state(state)
@@ -631,7 +631,7 @@ def extract_glb(
     glb_path = os.path.join(user_dir, f'sample_{timestamp}.glb')
     glb.export(glb_path, extension_webp=True)
     torch.cuda.empty_cache()
-    return glb_path, glb_path
+    return glb_path, glb_path, glb_path
 
 
 with gr.Blocks(delete_cache=(600, 600)) as demo:
@@ -684,7 +684,11 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         with gr.Column(scale=10):
             with gr.Walkthrough(selected=0) as walkthrough:
                 with gr.Step("Preview", id=0):
-                    preview_output = gr.HTML(empty_html, label="3D Asset Preview", show_label=True, container=True)
+                    with gr.Tabs():
+                        with gr.Tab("Rendered Snapshots"):
+                            preview_output = gr.HTML(empty_html, label="3D Asset Preview", show_label=True, container=True)
+                        with gr.Tab("Interactive GLB"):
+                            preview_glb_output = gr.Model3D(label="Interactive GLB Preview", height=724, show_label=True, display_mode="solid", clear_color=(0.25, 0.25, 0.25, 1.0))
                     extract_btn = gr.Button("Extract GLB")
                 with gr.Step("Extract", id=1):
                     glb_output = gr.Model3D(label="Extracted GLB", height=724, show_label=True, display_mode="solid", clear_color=(0.25, 0.25, 0.25, 1.0))
@@ -722,7 +726,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
         ],
-        outputs=[output_buf, preview_output],
+        outputs=[output_buf, preview_output, preview_glb_output],
     )
     
     extract_btn.click(
@@ -730,7 +734,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     ).then(
         extract_glb,
         inputs=[output_buf, decimation_target, texture_size],
-        outputs=[glb_output, download_btn],
+        outputs=[preview_glb_output, glb_output, download_btn],
     )
         
 
