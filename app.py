@@ -495,6 +495,38 @@ def get_video_path(video: Any) -> Optional[str]:
     return None
 
 
+def safe_upload_filename(video_path: str) -> str:
+    name = os.path.basename(video_path) or "video"
+    stem, ext = os.path.splitext(name)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-") or "video"
+    ext = re.sub(r"[^A-Za-z0-9.]+", "", ext)[:12] or ".mp4"
+    parent = os.path.basename(os.path.dirname(video_path))
+    prefix = re.sub(r"[^A-Za-z0-9._-]+", "_", parent)[:12] or "upload"
+    return f"{prefix}_{stem}{ext}"
+
+
+def persist_hitem_video_upload(video: Any) -> Optional[str]:
+    video_path = get_video_path(video)
+    if not video_path or not os.path.exists(video_path):
+        return None
+
+    upload_dir = os.path.join(TMP_DIR, "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    saved_path = os.path.join(upload_dir, safe_upload_filename(video_path))
+    if os.path.abspath(video_path) == os.path.abspath(saved_path):
+        return saved_path
+
+    if not os.path.exists(saved_path) or os.path.getsize(saved_path) != os.path.getsize(video_path):
+        shutil.copy2(video_path, saved_path)
+    return saved_path
+
+
+def get_preferred_video_path(video: Any, saved_video_path: Optional[str] = None) -> Optional[str]:
+    if saved_video_path and os.path.exists(saved_video_path):
+        return saved_video_path
+    return get_video_path(video)
+
+
 def get_video_duration(video_path: str) -> float:
     ensure_ffmpeg_on_path()
     ffmpeg_exe = shutil.which("ffmpeg")
@@ -562,8 +594,8 @@ def extract_frame_with_ffmpeg(video_path: str, target_time: float, output_path: 
         return image.convert("RGB")
 
 
-def preview_hitem_video_frame(video: Any, base_time: float) -> tuple[Optional[Image.Image], str]:
-    video_path = get_video_path(video)
+def preview_hitem_video_frame(video: Any, base_time: float, saved_video_path: str = "") -> tuple[Optional[Image.Image], str]:
+    video_path = get_preferred_video_path(video, saved_video_path)
     if not video_path:
         return None, ""
     if not os.path.exists(video_path):
@@ -583,15 +615,22 @@ def preview_hitem_video_frame(video: Any, base_time: float) -> tuple[Optional[Im
     return image, f"Base frame: {target_time:.2f}s"
 
 
-def update_hitem_video_controls(video: Any) -> tuple[Any, Optional[Image.Image], str]:
-    video_path = get_video_path(video)
+def update_hitem_video_controls(video: Any) -> tuple[Any, Optional[Image.Image], str, str]:
+    try:
+        saved_video_path = persist_hitem_video_upload(video)
+    except Exception as exc:
+        return gr.update(value=0.0, maximum=60.0), None, f"Could not save uploaded video: {exc}", ""
+
+    video_path = get_preferred_video_path(video, saved_video_path)
     if not video_path or not os.path.exists(video_path):
-        return gr.update(value=0.0, maximum=60.0), None, ""
+        return gr.update(value=0.0, maximum=60.0), None, "", ""
 
     duration = get_video_duration(video_path)
     maximum = max(0.1, duration) if duration > 0 else 60.0
-    preview, status = preview_hitem_video_frame(video, 0.0)
-    return gr.update(value=0.0, maximum=maximum), preview, status
+    preview, status = preview_hitem_video_frame(video, 0.0, saved_video_path or "")
+    if saved_video_path:
+        status = f"{status} | Saved: {saved_video_path}"
+    return gr.update(value=0.0, maximum=maximum), preview, status, saved_video_path or ""
 
 
 def extract_video_frames(
@@ -632,6 +671,7 @@ def extract_video_frames(
 def prepare_hitem3d_inputs(
     image: Optional[Image.Image],
     video: Any,
+    saved_video_path: str,
     use_video: bool,
     base_time: float,
     frame_count: int,
@@ -641,7 +681,7 @@ def prepare_hitem3d_inputs(
     progress=gr.Progress(track_tqdm=True),
 ) -> list[str]:
     if use_video:
-        video_path = get_video_path(video)
+        video_path = get_preferred_video_path(video, saved_video_path)
         if not video_path:
             raise gr.Error("Upload a video or turn off Use Video Frames.")
         return extract_video_frames(
@@ -750,6 +790,7 @@ def hitem3d_result_html(cover_path: Optional[str], task_id: str) -> str:
 def image_to_3d(
     image: Image.Image,
     video: Any,
+    hitem_video_saved_path: str,
     backend: str,
     seed: int,
     resolution: str,
@@ -795,6 +836,7 @@ def image_to_3d(
         image_paths = prepare_hitem3d_inputs(
             image,
             video,
+            hitem_video_saved_path,
             hitem_use_video,
             hitem_video_base_time,
             hitem_video_frame_count,
@@ -1112,6 +1154,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             )
                     
     output_buf = gr.State()
+    hitem_video_path_state = gr.State("")
     
 
     # Handlers
@@ -1121,11 +1164,11 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     hitem_video.change(
         update_hitem_video_controls,
         inputs=[hitem_video],
-        outputs=[hitem_video_base_time, hitem_video_preview, hitem_video_status],
+        outputs=[hitem_video_base_time, hitem_video_preview, hitem_video_status, hitem_video_path_state],
     )
     hitem_video_base_time.input(
         preview_hitem_video_frame,
-        inputs=[hitem_video, hitem_video_base_time],
+        inputs=[hitem_video, hitem_video_base_time, hitem_video_path_state],
         outputs=[hitem_video_preview, hitem_video_status],
         queue=False,
     )
@@ -1139,7 +1182,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     ).then(
         image_to_3d,
         inputs=[
-            image_prompt, hitem_video, backend, seed, resolution,
+            image_prompt, hitem_video, hitem_video_path_state, backend, seed, resolution,
             hitem_model, hitem_speed, hitem_face_count, hitem_remove_background,
             hitem_use_video, hitem_video_base_time, hitem_video_frame_count, hitem_video_frame_spacing,
             rodin_prompt, rodin_quality, rodin_mesh_mode, rodin_tapose, rodin_remove_background, rodin_use_original_alpha, rodin_hd_texture,
