@@ -4,6 +4,7 @@ import os
 import argparse
 import re
 import subprocess
+import tempfile
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from datetime import datetime
@@ -495,6 +496,7 @@ def get_video_path(video: Any) -> Optional[str]:
 
 
 def get_video_duration(video_path: str) -> float:
+    ensure_ffmpeg_on_path()
     ffmpeg_exe = shutil.which("ffmpeg")
     if not ffmpeg_exe:
         return 0.0
@@ -512,6 +514,12 @@ def get_video_duration(video_path: str) -> float:
 
     hours, minutes, seconds = match.groups()
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def clamp_video_time(value: float, duration: float) -> float:
+    if duration <= 0:
+        return max(0.0, float(value or 0.0))
+    return min(max(0.0, float(value or 0.0)), max(0.0, duration - 0.001))
 
 
 def extract_frame_with_ffmpeg(video_path: str, target_time: float, output_path: str) -> Image.Image:
@@ -554,6 +562,38 @@ def extract_frame_with_ffmpeg(video_path: str, target_time: float, output_path: 
         return image.convert("RGB")
 
 
+def preview_hitem_video_frame(video: Any, base_time: float) -> tuple[Optional[Image.Image], str]:
+    video_path = get_video_path(video)
+    if not video_path:
+        return None, ""
+    if not os.path.exists(video_path):
+        return None, f"Video file is missing: {video_path}"
+
+    try:
+        duration = get_video_duration(video_path)
+        target_time = clamp_video_time(base_time, duration)
+        with tempfile.TemporaryDirectory(prefix="trellis2-video-preview-") as preview_dir:
+            preview_path = os.path.join(preview_dir, "base_frame.png")
+            image = extract_frame_with_ffmpeg(video_path, target_time, preview_path)
+    except Exception as exc:
+        return None, str(exc)
+
+    if duration > 0:
+        return image, f"Base frame: {target_time:.2f}s / {duration:.2f}s"
+    return image, f"Base frame: {target_time:.2f}s"
+
+
+def update_hitem_video_controls(video: Any) -> tuple[Any, Optional[Image.Image], str]:
+    video_path = get_video_path(video)
+    if not video_path or not os.path.exists(video_path):
+        return gr.update(value=0.0, maximum=60.0), None, ""
+
+    duration = get_video_duration(video_path)
+    maximum = max(0.1, duration) if duration > 0 else 60.0
+    preview, status = preview_hitem_video_frame(video, 0.0)
+    return gr.update(value=0.0, maximum=maximum), preview, status
+
+
 def extract_video_frames(
     video_path: str,
     base_time: float,
@@ -567,8 +607,7 @@ def extract_video_frames(
         raise gr.Error(f"Video file is missing: {video_path}")
 
     duration = get_video_duration(video_path)
-    if duration > 0:
-        base_time = min(max(0.0, base_time), max(0.0, duration - 0.001))
+    base_time = clamp_video_time(base_time, duration)
     frame_count = int(max(1, min(4, frame_count)))
     spacing = max(0.0, spacing)
     offsets = (np.arange(frame_count) - (frame_count - 1) / 2) * spacing
@@ -1012,9 +1051,11 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 hitem_face_count = gr.Slider(100000, 2000000, label="Face Count", value=800000, step=100000)
                 hitem_remove_background = gr.Checkbox(label="Remove Background", value=True)
                 hitem_use_video = gr.Checkbox(label="Use Video Frames", value=False)
-                hitem_video_base_time = gr.Number(label="Base Time (seconds)", value=0.0, minimum=0.0)
+                hitem_video_base_time = gr.Slider(0.0, 60.0, label="Base Time (seconds)", value=0.0, step=0.05)
                 hitem_video_frame_count = gr.Slider(1, 4, label="Frame Count", value=4, step=1)
                 hitem_video_frame_spacing = gr.Slider(0.05, 1.0, label="Frame Spacing (seconds)", value=0.25, step=0.05)
+                hitem_video_preview = gr.Image(label="Base Frame Preview", type="pil", height=240, interactive=False)
+                hitem_video_status = gr.Textbox(label="Video Status", lines=1, interactive=False)
 
             with gr.Accordion(label="Rodin Settings", open=False):
                 rodin_prompt = gr.Textbox(label="Prompt", lines=2, placeholder="Optional image guidance prompt")
@@ -1076,6 +1117,18 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     # Handlers
     demo.load(start_session)
     demo.unload(end_session)
+
+    hitem_video.change(
+        update_hitem_video_controls,
+        inputs=[hitem_video],
+        outputs=[hitem_video_base_time, hitem_video_preview, hitem_video_status],
+    )
+    hitem_video_base_time.input(
+        preview_hitem_video_frame,
+        inputs=[hitem_video, hitem_video_base_time],
+        outputs=[hitem_video_preview, hitem_video_status],
+        queue=False,
+    )
     
     generate_btn.click(
         get_seed,
