@@ -16,8 +16,12 @@ Options:
 
 Environment:
   HF_CACHE           Host Hugging Face cache directory. Defaults to ~/.cache/huggingface.
+  .env               Optional repo-root environment file loaded before launch.
   HYPER3D_API_KEY    Hyper3D/Rodin API key. Used if --rodin-key is omitted.
   RODIN_API_KEY      Alternative Rodin API key env var.
+  HITEM3D_CLIENT_ID  Hitem3D public client id.
+  HITEM3D_CLIENT_SECRET
+                     Hitem3D client secret.
 USAGE
 }
 
@@ -83,6 +87,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 hf_cache="${HF_CACHE:-$HOME/.cache/huggingface}"
 mkdir -p "$hf_cache"
 
+if [[ -f "${repo_root}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${repo_root}/.env"
+  set +a
+fi
+
 docker_env_args=()
 if [[ -n "$rodin_key" ]]; then
   docker_env_args+=(-e "HYPER3D_API_KEY=${rodin_key}")
@@ -92,7 +103,10 @@ elif [[ -n "${RODIN_API_KEY:-}" ]]; then
   docker_env_args+=(-e "HYPER3D_API_KEY=${RODIN_API_KEY}")
 fi
 
-for env_name in RODIN_API_BASE_URL RODIN_REQUEST_TIMEOUT RODIN_DOWNLOAD_TIMEOUT; do
+for env_name in \
+  RODIN_API_BASE_URL RODIN_REQUEST_TIMEOUT RODIN_DOWNLOAD_TIMEOUT \
+  HITEM3D_CLIENT_ID HITEM3D_CLIENT_SECRET HITEM3D_API_BASE_URL \
+  HITEM3D_REQUEST_TIMEOUT HITEM3D_DOWNLOAD_TIMEOUT HITEM3D_POLL_INTERVAL HITEM3D_GENERATION_TIMEOUT; do
   if [[ -n "${!env_name:-}" ]]; then
     docker_env_args+=(-e "$env_name")
   fi

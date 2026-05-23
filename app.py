@@ -13,6 +13,11 @@ import numpy as np
 from PIL import Image
 import base64
 import io
+from hitem3d_api import (
+    Hitem3DError,
+    generate_images_to_3d as generate_hitem3d_images_to_3d,
+    has_hitem3d_credentials,
+)
 from rodin_api import (
     RodinError,
     generate_image_to_3d as generate_rodin_image_to_3d,
@@ -24,6 +29,11 @@ MAX_SEED = np.iinfo(np.int32).max
 TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tmp')
 TRELLIS_BACKEND = "TRELLIS.2 (local)"
 RODIN_BACKEND = "Rodin Gen-2 (Hyper3D API)"
+HITEM3D_BACKEND = "Hitem3D API"
+HITEM3D_MODELS = {
+    "Portrait v2.1": "scene-portraitv2.1",
+    "General v2.1": "hitem3dv2.1",
+}
 MODES = [
     {"name": "Normal", "icon": "assets/app/normal.png", "render_key": "normal"},
     {"name": "Clay render", "icon": "assets/app/clay.png", "render_key": "clay"},
@@ -431,6 +441,109 @@ def prepare_rodin_image(
     return crop_to_alpha(output)
 
 
+def save_api_image(image: Image.Image, path: str) -> str:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    image.save(path)
+    return path
+
+
+def get_video_path(video: Any) -> Optional[str]:
+    if video is None:
+        return None
+    if isinstance(video, str):
+        return video
+    if isinstance(video, (list, tuple)):
+        for value in video:
+            if isinstance(value, str):
+                return value
+    if isinstance(video, dict):
+        for key in ("video", "path", "name"):
+            value = video.get(key)
+            if isinstance(value, str):
+                return value
+    return None
+
+
+def extract_video_frames(
+    video_path: str,
+    base_time: float,
+    frame_count: int,
+    spacing: float,
+    output_dir: str,
+    remove_background: bool,
+    progress=gr.Progress(track_tqdm=True),
+) -> list[str]:
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise gr.Error("Could not open video.")
+
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        frame_total = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        duration = frame_total / fps if fps > 0 and frame_total > 0 else 0
+        if duration > 0:
+            base_time = min(max(0.0, base_time), duration)
+        frame_count = int(max(1, min(4, frame_count)))
+        spacing = max(0.0, spacing)
+        offsets = (np.arange(frame_count) - (frame_count - 1) / 2) * spacing
+        paths = []
+        for index, offset in enumerate(offsets, start=1):
+            target_time = max(0.0, base_time + float(offset))
+            if duration > 0:
+                target_time = min(target_time, duration)
+            cap.set(cv2.CAP_PROP_POS_MSEC, target_time * 1000)
+            ok, frame = cap.read()
+            if not ok:
+                raise gr.Error(f"Could not read video frame at {target_time:.2f}s.")
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(frame)
+            prepared = prepare_rodin_image(image, remove_background, progress=progress)
+            path = os.path.join(output_dir, f"hitem3d_video_frame_{index:02d}.png")
+            paths.append(save_api_image(prepared, path))
+        return paths
+    finally:
+        cap.release()
+
+
+def prepare_hitem3d_inputs(
+    image: Optional[Image.Image],
+    video: Any,
+    use_video: bool,
+    base_time: float,
+    frame_count: int,
+    spacing: float,
+    remove_background: bool,
+    user_dir: str,
+    progress=gr.Progress(track_tqdm=True),
+) -> list[str]:
+    if use_video:
+        video_path = get_video_path(video)
+        if not video_path:
+            raise gr.Error("Upload a video or turn off Use Video Frames.")
+        return extract_video_frames(
+            video_path,
+            base_time,
+            frame_count,
+            spacing,
+            user_dir,
+            remove_background,
+            progress=progress,
+        )
+
+    if image is None:
+        raise gr.Error("Upload an image first.")
+    prepared = prepare_rodin_image(image, remove_background, progress=progress)
+    return [save_api_image(prepared, os.path.join(user_dir, "hitem3d_input_01.png"))]
+
+
+def hitem3d_resolution(model_label: str, speed_label: str) -> str:
+    if speed_label == "Pro":
+        return "1536pro"
+    if model_label == "Portrait v2.1":
+        return "1536profast"
+    return "1536fast"
+
+
 def pack_state(latents: tuple) -> dict:
     shape_slat, tex_slat, res = latents
     return {
@@ -485,11 +598,45 @@ def rodin_result_html(preview_path: Optional[str], task_uuid: str) -> str:
     """
 
 
+def hitem3d_result_html(cover_path: Optional[str], task_id: str) -> str:
+    if cover_path:
+        try:
+            preview_image = Image.open(cover_path)
+            preview_src = image_to_base64(preview_image)
+            preview_markup = f"""
+                <img class="previewer-main-image visible"
+                     src="{preview_src}"
+                     loading="eager"
+                     style="display:block; max-height:100%; object-fit:contain;">
+            """
+        except Exception:
+            preview_markup = f"<p>Hitem3D task {task_id} completed.</p>"
+    else:
+        preview_markup = f"<p>Hitem3D task {task_id} completed.</p>"
+
+    return f"""
+    <div class="previewer-container">
+        <div class="display-row">
+            {preview_markup}
+        </div>
+    </div>
+    """
+
+
 def image_to_3d(
     image: Image.Image,
+    video: Any,
     backend: str,
     seed: int,
     resolution: str,
+    hitem_model: str,
+    hitem_speed: str,
+    hitem_face_count: int,
+    hitem_remove_background: bool,
+    hitem_use_video: bool,
+    hitem_video_base_time: float,
+    hitem_video_frame_count: int,
+    hitem_video_frame_spacing: float,
     rodin_prompt: str,
     rodin_quality: str,
     rodin_mesh_mode: str,
@@ -512,8 +659,47 @@ def image_to_3d(
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> tuple:
-    if image is None:
+    if backend != HITEM3D_BACKEND and image is None:
         raise gr.Error("Upload an image first.")
+
+    if backend == HITEM3D_BACKEND:
+        if not has_hitem3d_credentials():
+            raise gr.Error("Set HITEM3D_CLIENT_ID and HITEM3D_CLIENT_SECRET before using Hitem3D.")
+
+        user_dir = os.path.join(TMP_DIR, str(req.session_hash))
+        hitem_dir = os.path.join(user_dir, "hitem3d")
+        image_paths = prepare_hitem3d_inputs(
+            image,
+            video,
+            hitem_use_video,
+            hitem_video_base_time,
+            hitem_video_frame_count,
+            hitem_video_frame_spacing,
+            hitem_remove_background,
+            hitem_dir,
+            progress=progress,
+        )
+        try:
+            result = generate_hitem3d_images_to_3d(
+                image_paths,
+                hitem_dir,
+                model=HITEM3D_MODELS[hitem_model],
+                resolution=hitem3d_resolution(hitem_model, hitem_speed),
+                face_count=hitem_face_count,
+                pbr=True,
+                progress=progress,
+            )
+        except Hitem3DError as exc:
+            raise gr.Error(str(exc)) from exc
+
+        state = {
+            'backend': 'hitem3d',
+            'task_id': result.task_id,
+            'glb_path': result.glb_path,
+            'cover_path': result.cover_path,
+            'input_paths': image_paths,
+        }
+        return state, hitem3d_result_html(result.cover_path, result.task_id), result.glb_path
 
     if backend == RODIN_BACKEND:
         api_key = get_rodin_api_key()
@@ -681,10 +867,10 @@ def extract_glb(
         raise gr.Error("Generate a 3D asset first.")
 
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
-    if state.get('backend') == 'rodin':
+    if state.get('backend') in {'rodin', 'hitem3d'}:
         glb_path = state.get('glb_path')
         if not glb_path or not os.path.exists(glb_path):
-            raise gr.Error("Rodin GLB is missing. Generate again.")
+            raise gr.Error("Generated GLB is missing. Generate again.")
         return glb_path, glb_path, glb_path
 
     trellis_pipeline, _ = get_trellis_pipeline()
@@ -718,21 +904,32 @@ def extract_glb(
 
 with gr.Blocks(delete_cache=(600, 600)) as demo:
     gr.Markdown("""
-    ## Image to 3D Asset with [TRELLIS.2](https://microsoft.github.io/TRELLIS.2) or Rodin Gen-2
-    * Upload an image (preferably with an alpha-masked foreground object) and click Generate to create a 3D asset.
+    ## Image to 3D Asset with [TRELLIS.2](https://microsoft.github.io/TRELLIS.2), Rodin Gen-2, or Hitem3D
+    * Upload an image or Hitem3D video source and click Generate to create a 3D asset.
     * Click Extract GLB to export and download the generated GLB file if you're satisfied with the result. Otherwise, try another time.
     """)
     
     with gr.Row():
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
-            backend = gr.Radio([TRELLIS_BACKEND, RODIN_BACKEND], label="Backend", value=TRELLIS_BACKEND)
+            hitem_video = gr.Video(label="Video Prompt", sources=["upload"], include_audio=False)
+            backend = gr.Radio([TRELLIS_BACKEND, RODIN_BACKEND, HITEM3D_BACKEND], label="Backend", value=TRELLIS_BACKEND)
             
             resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
+
+            with gr.Accordion(label="Hitem3D Settings", open=False):
+                hitem_model = gr.Radio(list(HITEM3D_MODELS.keys()), label="Model", value="Portrait v2.1")
+                hitem_speed = gr.Radio(["Fast", "Pro"], label="Resolution", value="Fast")
+                hitem_face_count = gr.Slider(100000, 2000000, label="Face Count", value=800000, step=100000)
+                hitem_remove_background = gr.Checkbox(label="Remove Background", value=True)
+                hitem_use_video = gr.Checkbox(label="Use Video Frames", value=False)
+                hitem_video_base_time = gr.Number(label="Base Time (seconds)", value=0.0, minimum=0.0)
+                hitem_video_frame_count = gr.Slider(1, 4, label="Frame Count", value=4, step=1)
+                hitem_video_frame_spacing = gr.Slider(0.05, 1.0, label="Frame Spacing (seconds)", value=0.25, step=0.05)
 
             with gr.Accordion(label="Rodin Settings", open=False):
                 rodin_prompt = gr.Textbox(label="Prompt", lines=2, placeholder="Optional image guidance prompt")
@@ -804,7 +1001,9 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     ).then(
         image_to_3d,
         inputs=[
-            image_prompt, backend, seed, resolution,
+            image_prompt, hitem_video, backend, seed, resolution,
+            hitem_model, hitem_speed, hitem_face_count, hitem_remove_background,
+            hitem_use_video, hitem_video_base_time, hitem_video_frame_count, hitem_video_frame_spacing,
             rodin_prompt, rodin_quality, rodin_mesh_mode, rodin_tapose, rodin_remove_background, rodin_use_original_alpha, rodin_hd_texture,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
