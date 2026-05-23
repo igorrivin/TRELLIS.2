@@ -50,6 +50,34 @@ envmap = None
 rembg_model = None
 
 
+def ensure_ffmpeg_on_path() -> None:
+    """Expose imageio-ffmpeg's bundled binary for Gradio video preprocessing."""
+    if shutil.which("ffmpeg"):
+        return
+
+    try:
+        import imageio_ffmpeg
+    except Exception:
+        return
+
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    if not os.path.exists(ffmpeg_exe):
+        return
+
+    shim_dir = os.path.join("/tmp", "trellis2-bin")
+    shim_path = os.path.join(shim_dir, "ffmpeg")
+    os.makedirs(shim_dir, exist_ok=True)
+    if not os.path.exists(shim_path):
+        try:
+            os.symlink(ffmpeg_exe, shim_path)
+        except FileExistsError:
+            pass
+    os.environ["PATH"] = f"{shim_dir}:{os.environ.get('PATH', '')}"
+
+
+ensure_ffmpeg_on_path()
+
+
 css = """
 /* Overwrite Gradio Default Style */
 .stepper-wrapper {
