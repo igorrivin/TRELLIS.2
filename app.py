@@ -2,6 +2,8 @@ import gradio as gr
 
 import os
 import argparse
+import re
+import subprocess
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from datetime import datetime
@@ -492,6 +494,66 @@ def get_video_path(video: Any) -> Optional[str]:
     return None
 
 
+def get_video_duration(video_path: str) -> float:
+    ffmpeg_exe = shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        return 0.0
+
+    result = subprocess.run(
+        [ffmpeg_exe, "-hide_banner", "-i", video_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr)
+    if not match:
+        return 0.0
+
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def extract_frame_with_ffmpeg(video_path: str, target_time: float, output_path: str) -> Image.Image:
+    ensure_ffmpeg_on_path()
+    ffmpeg_exe = shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        raise gr.Error("ffmpeg is not available for video frame extraction.")
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    try:
+        os.remove(output_path)
+    except FileNotFoundError:
+        pass
+    result = subprocess.run(
+        [
+            ffmpeg_exe,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{target_time:.3f}",
+            "-i",
+            video_path,
+            "-frames:v",
+            "1",
+            output_path,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        detail = result.stderr.strip()
+        suffix = f" ffmpeg said: {detail[:500]}" if detail else ""
+        raise gr.Error(f"Could not read video frame at {target_time:.2f}s.{suffix}")
+
+    with Image.open(output_path) as image:
+        return image.convert("RGB")
+
+
 def extract_video_frames(
     video_path: str,
     base_time: float,
@@ -501,36 +563,31 @@ def extract_video_frames(
     remove_background: bool,
     progress=gr.Progress(track_tqdm=True),
 ) -> list[str]:
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise gr.Error("Could not open video.")
+    if not os.path.exists(video_path):
+        raise gr.Error(f"Video file is missing: {video_path}")
 
-    try:
-        fps = cap.get(cv2.CAP_PROP_FPS) or 0
-        frame_total = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-        duration = frame_total / fps if fps > 0 and frame_total > 0 else 0
+    duration = get_video_duration(video_path)
+    if duration > 0:
+        base_time = min(max(0.0, base_time), max(0.0, duration - 0.001))
+    frame_count = int(max(1, min(4, frame_count)))
+    spacing = max(0.0, spacing)
+    offsets = (np.arange(frame_count) - (frame_count - 1) / 2) * spacing
+    paths = []
+    for index, offset in enumerate(offsets, start=1):
+        target_time = max(0.0, base_time + float(offset))
         if duration > 0:
-            base_time = min(max(0.0, base_time), duration)
-        frame_count = int(max(1, min(4, frame_count)))
-        spacing = max(0.0, spacing)
-        offsets = (np.arange(frame_count) - (frame_count - 1) / 2) * spacing
-        paths = []
-        for index, offset in enumerate(offsets, start=1):
-            target_time = max(0.0, base_time + float(offset))
-            if duration > 0:
-                target_time = min(target_time, duration)
-            cap.set(cv2.CAP_PROP_POS_MSEC, target_time * 1000)
-            ok, frame = cap.read()
-            if not ok:
-                raise gr.Error(f"Could not read video frame at {target_time:.2f}s.")
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(frame)
-            prepared = prepare_rodin_image(image, remove_background, progress=progress)
-            path = os.path.join(output_dir, f"hitem3d_video_frame_{index:02d}.png")
-            paths.append(save_api_image(prepared, path))
-        return paths
-    finally:
-        cap.release()
+            target_time = min(target_time, max(0.0, duration - 0.001))
+        raw_path = os.path.join(output_dir, f"hitem3d_video_raw_{index:02d}.png")
+        image = extract_frame_with_ffmpeg(video_path, target_time, raw_path)
+        prepared = prepare_rodin_image(image, remove_background, progress=progress)
+        path = os.path.join(output_dir, f"hitem3d_video_frame_{index:02d}.png")
+        paths.append(save_api_image(prepared, path))
+        if raw_path != path:
+            try:
+                os.remove(raw_path)
+            except OSError:
+                pass
+    return paths
 
 
 def prepare_hitem3d_inputs(
@@ -940,7 +997,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     with gr.Row():
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
-            hitem_video = gr.Video(label="Video Prompt", sources=["upload"], include_audio=False)
+            hitem_video = gr.Video(label="Video Prompt", sources=["upload"], include_audio=True)
             backend = gr.Radio([TRELLIS_BACKEND, RODIN_BACKEND, HITEM3D_BACKEND], label="Backend", value=TRELLIS_BACKEND)
             
             resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1024")
