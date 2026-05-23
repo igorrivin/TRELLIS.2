@@ -39,6 +39,7 @@ def generate_image_to_3d(
     seed: Optional[int] = None,
     quality: str = "medium",
     mesh_mode: str = "Quad",
+    tapose: bool = False,
     use_original_alpha: bool = True,
     hd_texture: bool = False,
     poll_interval: float = 10.0,
@@ -57,6 +58,7 @@ def generate_image_to_3d(
         seed=seed,
         quality=quality,
         mesh_mode=mesh_mode,
+        tapose=tapose,
         use_original_alpha=use_original_alpha,
         hd_texture=hd_texture,
     )
@@ -81,6 +83,7 @@ def submit_generation(
     seed: Optional[int],
     quality: str,
     mesh_mode: str,
+    tapose: bool,
     use_original_alpha: bool,
     hd_texture: bool,
 ) -> tuple[str, str]:
@@ -90,6 +93,7 @@ def submit_generation(
         ("material", (None, "PBR")),
         ("quality", (None, quality)),
         ("mesh_mode", (None, mesh_mode)),
+        ("TAPose", (None, str(bool(tapose)).lower())),
         ("use_original_alpha", (None, str(bool(use_original_alpha)).lower())),
         ("preview_render", (None, "true")),
         ("hd_texture", (None, str(bool(hd_texture)).lower())),

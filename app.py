@@ -493,6 +493,7 @@ def image_to_3d(
     rodin_prompt: str,
     rodin_quality: str,
     rodin_mesh_mode: str,
+    rodin_tapose: bool,
     rodin_remove_background: bool,
     rodin_use_original_alpha: bool,
     rodin_hd_texture: bool,
@@ -534,6 +535,7 @@ def image_to_3d(
                 seed=seed,
                 quality=rodin_quality,
                 mesh_mode=rodin_mesh_mode,
+                tapose=rodin_tapose,
                 use_original_alpha=rodin_use_original_alpha,
                 hd_texture=rodin_hd_texture,
                 progress=progress,
@@ -736,6 +738,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 rodin_prompt = gr.Textbox(label="Prompt", lines=2, placeholder="Optional image guidance prompt")
                 rodin_quality = gr.Radio(["medium", "high", "low", "extra-low"], label="Quality", value="medium")
                 rodin_mesh_mode = gr.Radio(["Quad", "Raw"], label="Mesh Mode", value="Quad")
+                rodin_tapose = gr.Checkbox(label="T/A Pose", value=False)
                 rodin_remove_background = gr.Checkbox(label="Remove Background", value=True)
                 rodin_use_original_alpha = gr.Checkbox(label="Use Original Alpha", value=True)
                 rodin_hd_texture = gr.Checkbox(label="HD Texture", value=False)
@@ -802,7 +805,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         image_to_3d,
         inputs=[
             image_prompt, backend, seed, resolution,
-            rodin_prompt, rodin_quality, rodin_mesh_mode, rodin_remove_background, rodin_use_original_alpha, rodin_hd_texture,
+            rodin_prompt, rodin_quality, rodin_mesh_mode, rodin_tapose, rodin_remove_background, rodin_use_original_alpha, rodin_hd_texture,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
