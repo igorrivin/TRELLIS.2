@@ -31,6 +31,7 @@ from threedai_api import (
     ThreeDAIStudioError,
     generate_tripo_p1,
     get_threedai_api_key,
+    repair_mesh as repair_threedai_mesh,
 )
 
 
@@ -59,6 +60,8 @@ RODIN_GEOMETRY_INSTRUCT_MODES = ["faithful", "creative"]
 TRIPO_TEXTURE_QUALITIES = ["standard", "detailed"]
 TRIPO_TEXTURE_ALIGNMENTS = ["original_image", "geometry"]
 TRIPO_ORIENTATIONS = ["default", "align_image"]
+TRIPO_REPAIR_QUALITIES = ["low", "default", "max"]
+TRIPO_REPAIR_TOPOLOGIES = ["tris", "quads"]
 SNAPSHOT_TAB = "snapshots"
 GLB_TAB = "interactive-glb"
 MODEL3D_SUPPORTED_EXTS = (".glb", ".gltf", ".obj", ".stl")
@@ -1027,6 +1030,10 @@ def image_to_3d(
     tripo_texture_alignment: str,
     tripo_orientation: str,
     tripo_enable_image_autofix: bool,
+    tripo_repair_mesh: bool,
+    tripo_repair_quality: str,
+    tripo_repair_topology: str,
+    tripo_repair_bake_textures: bool,
     ss_guidance_strength: float,
     ss_guidance_rescale: float,
     ss_sampling_steps: int,
@@ -1093,14 +1100,39 @@ def image_to_3d(
         except ThreeDAIStudioError as exc:
             raise gr.Error(str(exc)) from exc
 
+        repair_task_id = None
+        glb_path = result.glb_path
+        asset_url = result.asset_url
+        if tripo_repair_mesh:
+            try:
+                repaired = repair_threedai_mesh(
+                    result.glb_path,
+                    tripo_dir,
+                    api_key,
+                    output_format="glb",
+                    hollow=False,
+                    topology=tripo_repair_topology,
+                    quality=tripo_repair_quality,
+                    bake_textures=tripo_repair_bake_textures,
+                    progress=progress,
+                )
+            except ThreeDAIStudioError as exc:
+                raise gr.Error(str(exc)) from exc
+            repair_task_id = repaired.task_id
+            glb_path = repaired.glb_path
+            asset_url = repaired.asset_url
+
         state = {
             'backend': 'tripo_p1',
             'task_id': result.task_id,
-            'glb_path': result.glb_path,
-            'asset_url': result.asset_url,
+            'repair_task_id': repair_task_id,
+            'glb_path': glb_path,
+            'asset_url': asset_url,
             'input_paths': image_paths,
         }
-        return state, api_result_html("Tripo P1", None, result.task_id), result.glb_path, preview_tab_for_model(result.glb_path)
+        display_task_id = repair_task_id or result.task_id
+        provider = "Tripo P1 + Mesh Repair" if repair_task_id else "Tripo P1"
+        return state, api_result_html(provider, None, display_task_id), glb_path, preview_tab_for_model(glb_path)
 
     if backend == HITEM3D_BACKEND:
         if not has_hitem3d_credentials():
@@ -1483,6 +1515,10 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 tripo_texture_alignment = gr.Radio(TRIPO_TEXTURE_ALIGNMENTS, label="Texture Alignment", value="original_image")
                 tripo_orientation = gr.Radio(TRIPO_ORIENTATIONS, label="Orientation", value="align_image")
                 tripo_enable_image_autofix = gr.Checkbox(label="Image Autofix", value=False)
+                tripo_repair_mesh = gr.Checkbox(label="Repair Mesh After Generation (+60 credits)", value=False)
+                tripo_repair_quality = gr.Radio(TRIPO_REPAIR_QUALITIES, label="Repair Quality", value="default")
+                tripo_repair_topology = gr.Radio(TRIPO_REPAIR_TOPOLOGIES, label="Repair Topology", value="tris")
+                tripo_repair_bake_textures = gr.Checkbox(label="Bake Textures During Repair", value=True)
             
             generate_btn = gr.Button("Generate")
                 
@@ -1569,7 +1605,8 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             tripo_texture_quality, tripo_remove_background, tripo_use_model_seed, tripo_model_seed,
             tripo_use_image_seed, tripo_image_seed, tripo_use_texture_seed, tripo_texture_seed,
             tripo_auto_size, tripo_export_uv, tripo_compress_geometry, tripo_texture_alignment,
-            tripo_orientation, tripo_enable_image_autofix,
+            tripo_orientation, tripo_enable_image_autofix, tripo_repair_mesh, tripo_repair_quality,
+            tripo_repair_topology, tripo_repair_bake_textures,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,

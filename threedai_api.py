@@ -87,9 +87,53 @@ def generate_tripo_p1(
 
     update_progress(progress, 0.02, "Submitting to Tripo P1")
     task_id = submit_generation(api_key, endpoint, payload)
-    wait_until_done(api_key, task_id, poll_interval=poll_interval, timeout=timeout, progress=progress)
+    wait_until_done(api_key, task_id, poll_interval=poll_interval, timeout=timeout, progress=progress, label="Tripo P1")
     update_progress(progress, 0.95, "Downloading Tripo P1 result")
     return download_result(api_key, task_id, output_dir)
+
+
+def repair_mesh(
+    model_path: str,
+    output_dir: str,
+    api_key: str,
+    *,
+    output_format: str = "glb",
+    hollow: bool = False,
+    wall_thickness: float = 2.0,
+    unit: str = "cm",
+    topology: str = "tris",
+    quality: str = "default",
+    texture_resolution: int = 4096,
+    bake_textures: bool = True,
+    poll_interval: float = THREEDAI_POLL_INTERVAL,
+    timeout: float = THREEDAI_GENERATION_TIMEOUT,
+    progress: Optional[Callable] = None,
+) -> ThreeDAIStudioResult:
+    if not os.path.exists(model_path):
+        raise ThreeDAIStudioError(f"Mesh repair input is missing: {model_path}")
+
+    os.makedirs(output_dir, exist_ok=True)
+    update_progress(progress, 0.02, "Submitting mesh repair")
+    task_id = submit_repair(
+        api_key,
+        model_path,
+        output_format=output_format,
+        hollow=hollow,
+        wall_thickness=wall_thickness,
+        unit=unit,
+        topology=topology,
+        quality=quality,
+        texture_resolution=texture_resolution,
+        bake_textures=bake_textures,
+    )
+    wait_until_done(api_key, task_id, poll_interval=poll_interval, timeout=timeout, progress=progress, label="Mesh repair")
+    update_progress(progress, 0.95, "Downloading repaired mesh")
+    return download_result(
+        api_key,
+        task_id,
+        output_dir,
+        output_name=f"tripo_p1_repaired.{output_format.lower().lstrip('.')}",
+    )
 
 
 def build_tripo_p1_payload(
@@ -175,6 +219,49 @@ def submit_generation(api_key: str, endpoint: str, payload: dict) -> str:
     return task_id
 
 
+def submit_repair(
+    api_key: str,
+    model_path: str,
+    *,
+    output_format: str,
+    hollow: bool,
+    wall_thickness: float,
+    unit: str,
+    topology: str,
+    quality: str,
+    texture_resolution: int,
+    bake_textures: bool,
+) -> str:
+    data = {
+        "output_format": output_format,
+        "hollow": str(bool(hollow)).lower(),
+        "wall_thickness": str(float(wall_thickness)),
+        "unit": unit,
+        "topology": topology,
+        "quality": quality,
+        "texture_resolution": str(int(texture_resolution)),
+        "bake_textures": str(bool(bake_textures)).lower(),
+    }
+    headers = {"Authorization": f"Bearer {api_key}"}
+    with open(model_path, "rb") as model_file:
+        files = {
+            "model_file": (os.path.basename(model_path), model_file, "model/gltf-binary"),
+        }
+        payload = request_json(
+            "POST",
+            "/v1/tools/repair/",
+            api_key=api_key,
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=THREEDAI_REQUEST_TIMEOUT,
+        )
+    task_id = payload.get("task_id")
+    if not task_id:
+        raise ThreeDAIStudioError(f"Mesh repair response did not include task_id: {payload}")
+    return task_id
+
+
 def wait_until_done(
     api_key: str,
     task_id: str,
@@ -182,6 +269,7 @@ def wait_until_done(
     poll_interval: float,
     timeout: float,
     progress: Optional[Callable],
+    label: str,
 ) -> None:
     started = time.monotonic()
     last_status_text = ""
@@ -196,17 +284,17 @@ def wait_until_done(
 
         status_text = f"{status} {api_progress}%" if api_progress is not None else status
         if status_text != last_status_text:
-            update_progress(progress, fraction, f"Tripo P1 status: {status_text}")
+            update_progress(progress, fraction, f"{label} status: {status_text}")
             last_status_text = status_text
 
         if status == "FINISHED":
-            update_progress(progress, 0.92, "Tripo P1 generation complete")
+            update_progress(progress, 0.92, f"{label} complete")
             return
         if status in {"FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"}:
             failure = data.get("failure_reason") or data
-            raise ThreeDAIStudioError(f"Tripo P1 generation failed: {failure}")
+            raise ThreeDAIStudioError(f"{label} failed: {failure}")
         if elapsed > timeout:
-            raise ThreeDAIStudioError(f"Timed out waiting for Tripo P1 after {int(timeout)} seconds.")
+            raise ThreeDAIStudioError(f"Timed out waiting for {label} after {int(timeout)} seconds.")
 
         time.sleep(max(1.0, poll_interval))
 
@@ -220,7 +308,13 @@ def query_task(api_key: str, task_id: str) -> dict:
     )
 
 
-def download_result(api_key: str, task_id: str, output_dir: str) -> ThreeDAIStudioResult:
+def download_result(
+    api_key: str,
+    task_id: str,
+    output_dir: str,
+    *,
+    output_name: str = "tripo_p1_result.glb",
+) -> ThreeDAIStudioResult:
     data = query_task(api_key, task_id)
     results = data.get("results") or []
     asset_url = None
@@ -236,17 +330,16 @@ def download_result(api_key: str, task_id: str, output_dir: str) -> ThreeDAIStud
     if not asset_url:
         raise ThreeDAIStudioError(f"Tripo P1 task completed without a model URL: {data}")
 
-    glb_path = os.path.join(output_dir, "tripo_p1_result.glb")
+    glb_path = os.path.join(output_dir, output_name)
     download_file(asset_url, glb_path)
     return ThreeDAIStudioResult(task_id=task_id, glb_path=glb_path, asset_url=asset_url)
 
 
 def request_json(method: str, endpoint: str, *, api_key: str, **kwargs) -> dict:
     headers = kwargs.pop("headers", {})
-    headers.update({
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    })
+    headers.update({"Authorization": f"Bearer {api_key}"})
+    if "json" in kwargs:
+        headers.setdefault("Content-Type", "application/json")
     response = requests.request(method, f"{THREEDAI_API_BASE_URL}{endpoint}", headers=headers, **kwargs)
     try:
         response.raise_for_status()
