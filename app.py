@@ -27,6 +27,11 @@ from rodin_api import (
     generate_images_to_3d as generate_rodin_images_to_3d,
     get_rodin_api_key,
 )
+from threedai_api import (
+    ThreeDAIStudioError,
+    generate_tripo_p1,
+    get_threedai_api_key,
+)
 
 
 MAX_SEED = np.iinfo(np.int32).max
@@ -35,6 +40,7 @@ TRELLIS_BACKEND = "TRELLIS.2 (local)"
 RODIN_BACKEND = "Rodin Gen-2 (Hyper3D API)"
 RODIN25_BACKEND = "Rodin Gen-2.5 (Hyper3D API)"
 HITEM3D_BACKEND = "Hitem3D API"
+TRIPO_P1_BACKEND = "Tripo P1 (3D AI Studio API)"
 HITEM3D_MODELS = {
     "Portrait v2.1": "scene-portraitv2.1",
     "General v2.1": "hitem3dv2.1",
@@ -50,6 +56,9 @@ RODIN_GEOMETRY_FORMATS = ["glb", "usdz", "fbx", "obj", "stl"]
 RODIN_MATERIALS = ["PBR", "Shaded", "All", "None"]
 RODIN_TEXTURE_MODES = ["legacy", "extreme-low", "low", "medium", "high"]
 RODIN_GEOMETRY_INSTRUCT_MODES = ["faithful", "creative"]
+TRIPO_TEXTURE_QUALITIES = ["standard", "detailed"]
+TRIPO_TEXTURE_ALIGNMENTS = ["original_image", "geometry"]
+TRIPO_ORIENTATIONS = ["default", "align_image"]
 MODEL3D_SUPPORTED_EXTS = (".glb", ".gltf", ".obj", ".stl")
 MODES = [
     {"name": "Normal", "icon": "assets/app/normal.png", "render_key": "normal"},
@@ -753,13 +762,47 @@ def prepare_rodin_inputs(
     return [save_api_image(prepared, os.path.join(user_dir, "rodin_input_01.png"))]
 
 
-def parse_optional_int(enabled: bool, value: Any) -> Optional[int]:
+def prepare_tripo_inputs(
+    image: Optional[Image.Image],
+    video: Any,
+    saved_video_path: str,
+    use_video: bool,
+    base_time: float,
+    frame_count: int,
+    spacing: float,
+    remove_background: bool,
+    user_dir: str,
+    progress=gr.Progress(track_tqdm=True),
+) -> list[str]:
+    if use_video:
+        video_path = get_preferred_video_path(video, saved_video_path)
+        if not video_path:
+            raise gr.Error("Upload a video or turn off Use Video Frames.")
+        return extract_video_frames(
+            video_path,
+            base_time,
+            frame_count,
+            spacing,
+            user_dir,
+            remove_background,
+            max_frames=4,
+            prefix="tripo_video",
+            progress=progress,
+        )
+
+    if image is None:
+        return []
+    prepared = prepare_rodin_image(image, remove_background, progress=progress)
+    return [save_api_image(prepared, os.path.join(user_dir, "tripo_input_01.png"))]
+
+
+def parse_optional_int(enabled: bool, value: Any, label: str = "Value") -> Optional[int]:
     if not enabled:
         return None
     try:
         return int(value)
     except (TypeError, ValueError):
-        raise gr.Error("Quality Override must be an integer.")
+        raise gr.Error(f"{label} must be an integer.")
 
 
 def model3d_path_or_none(path: Optional[str]) -> Optional[str]:
@@ -855,8 +898,33 @@ def hitem3d_result_html(cover_path: Optional[str], task_id: str) -> str:
     """
 
 
+def api_result_html(provider: str, preview_path: Optional[str], task_id: str) -> str:
+    if preview_path:
+        try:
+            preview_image = Image.open(preview_path)
+            preview_src = image_to_base64(preview_image)
+            preview_markup = f"""
+                <img class="previewer-main-image visible"
+                     src="{preview_src}"
+                     loading="eager"
+                     style="display:block; max-height:100%; object-fit:contain;">
+            """
+        except Exception:
+            preview_markup = f"<p>{provider} task {task_id} completed.</p>"
+    else:
+        preview_markup = f"<p>{provider} task {task_id} completed.</p>"
+
+    return f"""
+    <div class="previewer-container">
+        <div class="display-row">
+            {preview_markup}
+        </div>
+    </div>
+    """
+
+
 def image_to_3d(
-    image: Image.Image,
+    image: Optional[Image.Image],
     video: Any,
     hitem_video_saved_path: str,
     backend: str,
@@ -890,6 +958,25 @@ def image_to_3d(
     rodin_is_symmetric: bool,
     rodin_geometry_instruct_mode: str,
     rodin_bbox_condition: str,
+    tripo_prompt: str,
+    tripo_negative_prompt: str,
+    tripo_face_limit: int,
+    tripo_texture: bool,
+    tripo_pbr: bool,
+    tripo_texture_quality: str,
+    tripo_remove_background: bool,
+    tripo_use_model_seed: bool,
+    tripo_model_seed: int,
+    tripo_use_image_seed: bool,
+    tripo_image_seed: int,
+    tripo_use_texture_seed: bool,
+    tripo_texture_seed: int,
+    tripo_auto_size: bool,
+    tripo_export_uv: bool,
+    tripo_compress_geometry: bool,
+    tripo_texture_alignment: str,
+    tripo_orientation: str,
+    tripo_enable_image_autofix: bool,
     ss_guidance_strength: float,
     ss_guidance_rescale: float,
     ss_sampling_steps: int,
@@ -905,8 +992,64 @@ def image_to_3d(
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> tuple:
-    if backend not in {HITEM3D_BACKEND, RODIN25_BACKEND} and image is None:
+    if backend not in {HITEM3D_BACKEND, RODIN25_BACKEND, TRIPO_P1_BACKEND} and image is None:
         raise gr.Error("Upload an image first.")
+
+    if backend == TRIPO_P1_BACKEND:
+        api_key = get_threedai_api_key()
+        if not api_key:
+            raise gr.Error("Set THREEDAI_API_KEY, THREEDAISTUDIO_API_KEY, or AI3DSTUDIO_API_KEY before using Tripo P1.")
+
+        user_dir = os.path.join(TMP_DIR, str(req.session_hash))
+        tripo_dir = os.path.join(user_dir, "tripo_p1")
+        image_paths = prepare_tripo_inputs(
+            image,
+            video,
+            hitem_video_saved_path,
+            hitem_use_video,
+            hitem_video_base_time,
+            hitem_video_frame_count,
+            hitem_video_frame_spacing,
+            tripo_remove_background,
+            tripo_dir,
+            progress=progress,
+        )
+        if not image_paths and not tripo_prompt.strip():
+            raise gr.Error("Upload an image/video or provide a prompt for Tripo P1 text-to-3D.")
+
+        try:
+            result = generate_tripo_p1(
+                image_paths,
+                tripo_dir,
+                api_key,
+                prompt=tripo_prompt,
+                negative_prompt=tripo_negative_prompt,
+                face_limit=tripo_face_limit,
+                texture=tripo_texture,
+                pbr=tripo_pbr,
+                texture_quality=tripo_texture_quality,
+                model_seed=parse_optional_int(tripo_use_model_seed, tripo_model_seed, "Model Seed"),
+                image_seed=parse_optional_int(tripo_use_image_seed, tripo_image_seed, "Image Seed"),
+                texture_seed=parse_optional_int(tripo_use_texture_seed, tripo_texture_seed, "Texture Seed"),
+                auto_size=tripo_auto_size,
+                export_uv=tripo_export_uv,
+                compress_geometry=tripo_compress_geometry,
+                texture_alignment=tripo_texture_alignment,
+                orientation=tripo_orientation,
+                enable_image_autofix=tripo_enable_image_autofix,
+                progress=progress,
+            )
+        except ThreeDAIStudioError as exc:
+            raise gr.Error(str(exc)) from exc
+
+        state = {
+            'backend': 'tripo_p1',
+            'task_id': result.task_id,
+            'glb_path': result.glb_path,
+            'asset_url': result.asset_url,
+            'input_paths': image_paths,
+        }
+        return state, api_result_html("Tripo P1", None, result.task_id), result.glb_path
 
     if backend == HITEM3D_BACKEND:
         if not has_hitem3d_credentials():
@@ -984,7 +1127,7 @@ def image_to_3d(
                 use_original_alpha=rodin_use_original_alpha,
                 geometry_file_format=rodin_geometry_file_format,
                 material=rodin_material,
-                quality_override=parse_optional_int(rodin_use_quality_override, rodin_quality_override),
+                quality_override=parse_optional_int(rodin_use_quality_override, rodin_quality_override, "Quality Override"),
                 addons=["HighPack"] if rodin_highpack else [],
                 preview_render=rodin_preview_render,
                 hd_texture=rodin_hd_texture,
@@ -1176,7 +1319,7 @@ def extract_glb(
         raise gr.Error("Generate a 3D asset first.")
 
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
-    if state.get('backend') in {'rodin', 'hitem3d'}:
+    if state.get('backend') in {'rodin', 'hitem3d', 'tripo_p1'}:
         glb_path = state.get('glb_path')
         if not glb_path or not os.path.exists(glb_path):
             raise gr.Error("Generated asset is missing. Generate again.")
@@ -1214,7 +1357,7 @@ def extract_glb(
 
 with gr.Blocks(delete_cache=(600, 600)) as demo:
     gr.Markdown("""
-    ## Image to 3D Asset with [TRELLIS.2](https://microsoft.github.io/TRELLIS.2), Rodin, or Hitem3D
+    ## Image to 3D Asset with [TRELLIS.2](https://microsoft.github.io/TRELLIS.2), Rodin, Hitem3D, or Tripo P1
     * Upload an image or video source and click Generate to create a 3D asset.
     * Click Extract Asset to export and download the generated asset if you're satisfied with the result. Otherwise, try another time.
     """)
@@ -1223,7 +1366,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
             hitem_video = gr.Video(label="Video Prompt", sources=["upload"], include_audio=True)
-            backend = gr.Radio([TRELLIS_BACKEND, RODIN_BACKEND, RODIN25_BACKEND, HITEM3D_BACKEND], label="Backend", value=TRELLIS_BACKEND)
+            backend = gr.Radio([TRELLIS_BACKEND, RODIN_BACKEND, RODIN25_BACKEND, HITEM3D_BACKEND, TRIPO_P1_BACKEND], label="Backend", value=TRELLIS_BACKEND)
             
             resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
@@ -1266,6 +1409,27 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 rodin_is_symmetric = gr.Checkbox(label="Symmetric", value=False)
                 rodin_geometry_instruct_mode = gr.Radio(RODIN_GEOMETRY_INSTRUCT_MODES, label="Geometry Instruct Mode", value="faithful")
                 rodin_bbox_condition = gr.Textbox(label="BBox Condition [Y,Z,X]", lines=1, placeholder="[50,80,50]")
+
+            with gr.Accordion(label="Tripo P1 Settings", open=False):
+                tripo_prompt = gr.Textbox(label="Prompt", lines=2, placeholder="Required for text-to-3D")
+                tripo_negative_prompt = gr.Textbox(label="Negative Prompt", lines=1)
+                tripo_face_limit = gr.Slider(48, 20000, label="Face Limit", value=10000, step=1)
+                tripo_texture = gr.Checkbox(label="Texture", value=True)
+                tripo_pbr = gr.Checkbox(label="PBR", value=True)
+                tripo_texture_quality = gr.Radio(TRIPO_TEXTURE_QUALITIES, label="Texture Quality", value="standard")
+                tripo_remove_background = gr.Checkbox(label="Remove Background", value=True)
+                tripo_use_model_seed = gr.Checkbox(label="Use Model Seed", value=False)
+                tripo_model_seed = gr.Slider(0, MAX_SEED, label="Model Seed", value=0, step=1)
+                tripo_use_image_seed = gr.Checkbox(label="Use Image Seed", value=False)
+                tripo_image_seed = gr.Slider(0, MAX_SEED, label="Image Seed", value=0, step=1)
+                tripo_use_texture_seed = gr.Checkbox(label="Use Texture Seed", value=False)
+                tripo_texture_seed = gr.Slider(0, MAX_SEED, label="Texture Seed", value=0, step=1)
+                tripo_auto_size = gr.Checkbox(label="Auto Size", value=False)
+                tripo_export_uv = gr.Checkbox(label="Export UV", value=True)
+                tripo_compress_geometry = gr.Checkbox(label="Compress Geometry", value=False)
+                tripo_texture_alignment = gr.Radio(TRIPO_TEXTURE_ALIGNMENTS, label="Texture Alignment", value="original_image")
+                tripo_orientation = gr.Radio(TRIPO_ORIENTATIONS, label="Orientation", value="align_image")
+                tripo_enable_image_autofix = gr.Checkbox(label="Image Autofix", value=False)
             
             generate_btn = gr.Button("Generate")
                 
@@ -1348,6 +1512,11 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             rodin25_tier, rodin_geometry_file_format, rodin_material, rodin_use_quality_override, rodin_quality_override,
             rodin_highpack, rodin_preview_render, rodin_texture_delight, rodin_texture_mode, rodin_is_micro,
             rodin_is_symmetric, rodin_geometry_instruct_mode, rodin_bbox_condition,
+            tripo_prompt, tripo_negative_prompt, tripo_face_limit, tripo_texture, tripo_pbr,
+            tripo_texture_quality, tripo_remove_background, tripo_use_model_seed, tripo_model_seed,
+            tripo_use_image_seed, tripo_image_seed, tripo_use_texture_seed, tripo_texture_seed,
+            tripo_auto_size, tripo_export_uv, tripo_compress_geometry, tripo_texture_alignment,
+            tripo_orientation, tripo_enable_image_autofix,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
