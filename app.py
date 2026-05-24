@@ -548,9 +548,21 @@ def get_uploaded_file_paths(file_values: Any) -> list[str]:
         paths = []
         for item in file_values:
             paths.extend(get_uploaded_file_paths(item))
-        return paths
+        return dedupe_paths(paths)
     path = get_uploaded_file_path(file_values)
     return [path] if path else []
+
+
+def dedupe_paths(paths: list[str]) -> list[str]:
+    unique_paths = []
+    seen = set()
+    for path in paths:
+        canonical = os.path.realpath(path) if os.path.exists(path) else os.path.abspath(path)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        unique_paths.append(path)
+    return unique_paths
 
 
 def safe_upload_filename(video_path: str) -> str:
@@ -833,7 +845,7 @@ def prepare_tripo_inputs(
 
     upload_paths = uploaded_file_paths
     if len(upload_paths) > 4:
-        raise gr.Error("Tripo P1 supports at most 4 multiview images.")
+        raise gr.Error(f"Tripo P1 supports at most 4 multiview images; got {len(upload_paths)} distinct files.")
 
     use_main_image = image is not None and len(upload_paths) < 4
     if use_main_image:
