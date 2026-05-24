@@ -59,6 +59,8 @@ RODIN_GEOMETRY_INSTRUCT_MODES = ["faithful", "creative"]
 TRIPO_TEXTURE_QUALITIES = ["standard", "detailed"]
 TRIPO_TEXTURE_ALIGNMENTS = ["original_image", "geometry"]
 TRIPO_ORIENTATIONS = ["default", "align_image"]
+SNAPSHOT_TAB = "snapshots"
+GLB_TAB = "interactive-glb"
 MODEL3D_SUPPORTED_EXTS = (".glb", ".gltf", ".obj", ".stl")
 MODES = [
     {"name": "Normal", "icon": "assets/app/normal.png", "render_key": "normal"},
@@ -854,6 +856,10 @@ def model3d_path_or_none(path: Optional[str]) -> Optional[str]:
     return None
 
 
+def preview_tab_for_model(path: Optional[str]) -> Any:
+    return gr.update(selected=GLB_TAB if model3d_path_or_none(path) else SNAPSHOT_TAB)
+
+
 def hitem3d_resolution(model_label: str, speed_label: str) -> str:
     if speed_label == "Pro":
         return "1536pro"
@@ -1094,7 +1100,7 @@ def image_to_3d(
             'asset_url': result.asset_url,
             'input_paths': image_paths,
         }
-        return state, api_result_html("Tripo P1", None, result.task_id), result.glb_path
+        return state, api_result_html("Tripo P1", None, result.task_id), result.glb_path, preview_tab_for_model(result.glb_path)
 
     if backend == HITEM3D_BACKEND:
         if not has_hitem3d_credentials():
@@ -1134,7 +1140,7 @@ def image_to_3d(
             'cover_path': result.cover_path,
             'input_paths': image_paths,
         }
-        return state, hitem3d_result_html(result.cover_path, result.task_id), result.glb_path
+        return state, hitem3d_result_html(result.cover_path, result.task_id), result.glb_path, preview_tab_for_model(result.glb_path)
 
     if backend == RODIN25_BACKEND:
         api_key = get_rodin_api_key()
@@ -1196,7 +1202,8 @@ def image_to_3d(
             'downloaded_files': result.downloaded_files,
             'input_paths': image_paths,
         }
-        return state, rodin_result_html(result.preview_path, result.task_uuid), model3d_path_or_none(result.glb_path)
+        model3d_path = model3d_path_or_none(result.glb_path)
+        return state, rodin_result_html(result.preview_path, result.task_uuid), model3d_path, preview_tab_for_model(model3d_path)
 
     if backend == RODIN_BACKEND:
         api_key = get_rodin_api_key()
@@ -1234,7 +1241,7 @@ def image_to_3d(
             'preview_path': result.preview_path,
             'downloaded_files': result.downloaded_files,
         }
-        return state, rodin_result_html(result.preview_path, result.task_uuid), result.glb_path
+        return state, rodin_result_html(result.preview_path, result.task_uuid), result.glb_path, preview_tab_for_model(result.glb_path)
 
     trellis_pipeline, trellis_envmap = get_trellis_pipeline()
 
@@ -1339,7 +1346,7 @@ def image_to_3d(
     </div>
     """
     
-    return state, full_html, None
+    return state, full_html, None, gr.update(selected=SNAPSHOT_TAB)
 
 
 def extract_glb(
@@ -1502,10 +1509,10 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         with gr.Column(scale=10):
             with gr.Walkthrough(selected=0) as walkthrough:
                 with gr.Step("Preview", id=0):
-                    with gr.Tabs():
-                        with gr.Tab("Rendered Snapshots"):
+                    with gr.Tabs(selected=SNAPSHOT_TAB) as preview_tabs:
+                        with gr.Tab("Rendered Snapshots", id=SNAPSHOT_TAB):
                             preview_output = gr.HTML(empty_html, label="3D Asset Preview", show_label=True, container=True)
-                        with gr.Tab("Interactive GLB"):
+                        with gr.Tab("Interactive GLB", id=GLB_TAB):
                             preview_glb_output = gr.Model3D(label="Interactive GLB Preview", height=724, show_label=True, display_mode="solid", clear_color=(0.25, 0.25, 0.25, 1.0))
                     extract_btn = gr.Button("Extract Asset")
                 with gr.Step("Extract", id=1):
@@ -1567,7 +1574,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
         ],
-        outputs=[output_buf, preview_output, preview_glb_output],
+        outputs=[output_buf, preview_output, preview_glb_output, preview_tabs],
     )
     
     extract_btn.click(
