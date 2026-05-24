@@ -518,6 +518,35 @@ def get_video_path(video: Any) -> Optional[str]:
     return None
 
 
+def get_uploaded_file_path(file_value: Any) -> Optional[str]:
+    if file_value is None:
+        return None
+    if isinstance(file_value, str):
+        return file_value
+    if isinstance(file_value, dict):
+        for key in ("path", "name"):
+            value = file_value.get(key)
+            if isinstance(value, str):
+                return value
+    for attr in ("path", "name"):
+        value = getattr(file_value, attr, None)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def get_uploaded_file_paths(file_values: Any) -> list[str]:
+    if file_values is None:
+        return []
+    if isinstance(file_values, (list, tuple)):
+        paths = []
+        for item in file_values:
+            paths.extend(get_uploaded_file_paths(item))
+        return paths
+    path = get_uploaded_file_path(file_values)
+    return [path] if path else []
+
+
 def safe_upload_filename(video_path: str) -> str:
     name = os.path.basename(video_path) or "video"
     stem, ext = os.path.splitext(name)
@@ -764,6 +793,7 @@ def prepare_rodin_inputs(
 
 def prepare_tripo_inputs(
     image: Optional[Image.Image],
+    multiview_images: Any,
     video: Any,
     saved_video_path: str,
     use_video: bool,
@@ -791,9 +821,22 @@ def prepare_tripo_inputs(
         )
 
     if image is None:
-        return []
-    prepared = prepare_rodin_image(image, remove_background, progress=progress)
-    return [save_api_image(prepared, os.path.join(user_dir, "tripo_input_01.png"))]
+        paths = []
+    else:
+        prepared = prepare_rodin_image(image, remove_background, progress=progress)
+        paths = [save_api_image(prepared, os.path.join(user_dir, "tripo_input_01.png"))]
+
+    upload_paths = [path for path in get_uploaded_file_paths(multiview_images) if os.path.exists(path)]
+    if len(paths) + len(upload_paths) > 4:
+        raise gr.Error("Tripo P1 supports at most 4 images total.")
+
+    for source_path in upload_paths:
+        with Image.open(source_path) as uploaded:
+            prepared = prepare_rodin_image(uploaded.convert("RGBA"), remove_background, progress=progress)
+        index = len(paths) + 1
+        paths.append(save_api_image(prepared, os.path.join(user_dir, f"tripo_input_{index:02d}.png")))
+
+    return paths
 
 
 def parse_optional_int(enabled: bool, value: Any, label: str = "Value") -> Optional[int]:
@@ -925,6 +968,7 @@ def api_result_html(provider: str, preview_path: Optional[str], task_id: str) ->
 
 def image_to_3d(
     image: Optional[Image.Image],
+    tripo_multiview_images: Any,
     video: Any,
     hitem_video_saved_path: str,
     backend: str,
@@ -1004,6 +1048,7 @@ def image_to_3d(
         tripo_dir = os.path.join(user_dir, "tripo_p1")
         image_paths = prepare_tripo_inputs(
             image,
+            tripo_multiview_images,
             video,
             hitem_video_saved_path,
             hitem_use_video,
@@ -1367,6 +1412,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
             hitem_video = gr.Video(label="Video Prompt", sources=["upload"], include_audio=True)
             backend = gr.Radio([TRELLIS_BACKEND, RODIN_BACKEND, RODIN25_BACKEND, HITEM3D_BACKEND, TRIPO_P1_BACKEND], label="Backend", value=TRELLIS_BACKEND)
+            hitem_use_video = gr.Checkbox(label="Use Video Frames for API Backend", value=False)
             
             resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
@@ -1375,7 +1421,6 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
 
             with gr.Accordion(label="Video Settings", open=False):
-                hitem_use_video = gr.Checkbox(label="Use Video Frames", value=False)
                 hitem_video_base_time = gr.Slider(0.0, 60.0, label="Base Time (seconds)", value=0.0, step=0.05)
                 hitem_video_frame_count = gr.Slider(1, 5, label="Frame Count", value=4, step=1)
                 hitem_video_frame_spacing = gr.Slider(0.05, 1.0, label="Frame Spacing (seconds)", value=0.25, step=0.05)
@@ -1411,6 +1456,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 rodin_bbox_condition = gr.Textbox(label="BBox Condition [Y,Z,X]", lines=1, placeholder="[50,80,50]")
 
             with gr.Accordion(label="Tripo P1 Settings", open=False):
+                tripo_multiview_images = gr.File(label="Multiview Images", file_count="multiple", file_types=["image"], type="filepath")
                 tripo_prompt = gr.Textbox(label="Prompt", lines=2, placeholder="Required for text-to-3D")
                 tripo_negative_prompt = gr.Textbox(label="Negative Prompt", lines=1)
                 tripo_face_limit = gr.Slider(48, 20000, label="Face Limit", value=10000, step=1)
@@ -1505,7 +1551,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     ).then(
         image_to_3d,
         inputs=[
-            image_prompt, hitem_video, hitem_video_path_state, backend, seed, resolution,
+            image_prompt, tripo_multiview_images, hitem_video, hitem_video_path_state, backend, seed, resolution,
             hitem_model, hitem_speed, hitem_face_count, hitem_remove_background,
             hitem_use_video, hitem_video_base_time, hitem_video_frame_count, hitem_video_frame_spacing,
             rodin_prompt, rodin_quality, rodin_mesh_mode, rodin_tapose, rodin_remove_background, rodin_use_original_alpha, rodin_hd_texture,
