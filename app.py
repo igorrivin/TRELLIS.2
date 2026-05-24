@@ -826,15 +826,21 @@ def prepare_tripo_inputs(
             progress=progress,
         )
 
-    if image is None:
-        paths = []
-    else:
+    uploaded_file_paths = get_uploaded_file_paths(multiview_images)
+    missing_upload_paths = [path for path in uploaded_file_paths if not os.path.exists(path)]
+    if missing_upload_paths:
+        raise gr.Error("One or more uploaded multiview images are no longer available. Re-upload the multiview images.")
+
+    upload_paths = uploaded_file_paths
+    if len(upload_paths) > 4:
+        raise gr.Error("Tripo P1 supports at most 4 multiview images.")
+
+    use_main_image = image is not None and len(upload_paths) < 4
+    if use_main_image:
         prepared = prepare_rodin_image(image, remove_background, progress=progress)
         paths = [save_api_image(prepared, os.path.join(user_dir, "tripo_input_01.png"))]
-
-    upload_paths = [path for path in get_uploaded_file_paths(multiview_images) if os.path.exists(path)]
-    if len(paths) + len(upload_paths) > 4:
-        raise gr.Error("Tripo P1 supports at most 4 images total.")
+    else:
+        paths = []
 
     for source_path in upload_paths:
         with Image.open(source_path) as uploaded:
@@ -1516,7 +1522,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 rodin_bbox_condition = gr.Textbox(label="BBox Condition [Y,Z,X]", lines=1, placeholder="[50,80,50]")
 
             with gr.Accordion(label="Tripo P1 Settings", open=False):
-                tripo_multiview_images = gr.File(label="Multiview Images", file_count="multiple", file_types=["image"], type="filepath")
+                tripo_multiview_images = gr.File(label="Multiview Images (up to 4)", file_count="multiple", file_types=["image"], type="filepath")
                 tripo_prompt = gr.Textbox(label="Prompt", lines=2, placeholder="Required for text-to-3D")
                 tripo_negative_prompt = gr.Textbox(label="Negative Prompt", lines=1)
                 tripo_face_limit = gr.Slider(48, 20000, label="Face Limit", value=10000, step=1)
