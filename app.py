@@ -24,6 +24,7 @@ from hitem3d_api import (
 from rodin_api import (
     RodinError,
     generate_image_to_3d as generate_rodin_image_to_3d,
+    generate_images_to_3d as generate_rodin_images_to_3d,
     get_rodin_api_key,
 )
 
@@ -32,11 +33,24 @@ MAX_SEED = np.iinfo(np.int32).max
 TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tmp')
 TRELLIS_BACKEND = "TRELLIS.2 (local)"
 RODIN_BACKEND = "Rodin Gen-2 (Hyper3D API)"
+RODIN25_BACKEND = "Rodin Gen-2.5 (Hyper3D API)"
 HITEM3D_BACKEND = "Hitem3D API"
 HITEM3D_MODELS = {
     "Portrait v2.1": "scene-portraitv2.1",
     "General v2.1": "hitem3dv2.1",
 }
+RODIN25_TIERS = [
+    "Gen-2.5-Extreme-Low",
+    "Gen-2.5-Low",
+    "Gen-2.5-Medium",
+    "Gen-2.5-High",
+    "Gen-2.5-Extreme-High",
+]
+RODIN_GEOMETRY_FORMATS = ["glb", "usdz", "fbx", "obj", "stl"]
+RODIN_MATERIALS = ["PBR", "Shaded", "All", "None"]
+RODIN_TEXTURE_MODES = ["legacy", "extreme-low", "low", "medium", "high"]
+RODIN_GEOMETRY_INSTRUCT_MODES = ["faithful", "creative"]
+MODEL3D_SUPPORTED_EXTS = (".glb", ".gltf", ".obj", ".stl")
 MODES = [
     {"name": "Normal", "icon": "assets/app/normal.png", "render_key": "normal"},
     {"name": "Clay render", "icon": "assets/app/clay.png", "render_key": "clay"},
@@ -640,6 +654,9 @@ def extract_video_frames(
     spacing: float,
     output_dir: str,
     remove_background: bool,
+    *,
+    max_frames: int = 4,
+    prefix: str = "video",
     progress=gr.Progress(track_tqdm=True),
 ) -> list[str]:
     if not os.path.exists(video_path):
@@ -647,7 +664,7 @@ def extract_video_frames(
 
     duration = get_video_duration(video_path)
     base_time = clamp_video_time(base_time, duration)
-    frame_count = int(max(1, min(4, frame_count)))
+    frame_count = int(max(1, min(max_frames, frame_count)))
     spacing = max(0.0, spacing)
     offsets = (np.arange(frame_count) - (frame_count - 1) / 2) * spacing
     paths = []
@@ -655,10 +672,10 @@ def extract_video_frames(
         target_time = max(0.0, base_time + float(offset))
         if duration > 0:
             target_time = min(target_time, max(0.0, duration - 0.001))
-        raw_path = os.path.join(output_dir, f"hitem3d_video_raw_{index:02d}.png")
+        raw_path = os.path.join(output_dir, f"{prefix}_raw_{index:02d}.png")
         image = extract_frame_with_ffmpeg(video_path, target_time, raw_path)
         prepared = prepare_rodin_image(image, remove_background, progress=progress)
-        path = os.path.join(output_dir, f"hitem3d_video_frame_{index:02d}.png")
+        path = os.path.join(output_dir, f"{prefix}_frame_{index:02d}.png")
         paths.append(save_api_image(prepared, path))
         if raw_path != path:
             try:
@@ -691,6 +708,8 @@ def prepare_hitem3d_inputs(
             spacing,
             user_dir,
             remove_background,
+            max_frames=4,
+            prefix="hitem3d_video",
             progress=progress,
         )
 
@@ -698,6 +717,55 @@ def prepare_hitem3d_inputs(
         raise gr.Error("Upload an image first.")
     prepared = prepare_rodin_image(image, remove_background, progress=progress)
     return [save_api_image(prepared, os.path.join(user_dir, "hitem3d_input_01.png"))]
+
+
+def prepare_rodin_inputs(
+    image: Optional[Image.Image],
+    video: Any,
+    saved_video_path: str,
+    use_video: bool,
+    base_time: float,
+    frame_count: int,
+    spacing: float,
+    remove_background: bool,
+    user_dir: str,
+    progress=gr.Progress(track_tqdm=True),
+) -> list[str]:
+    if use_video:
+        video_path = get_preferred_video_path(video, saved_video_path)
+        if not video_path:
+            raise gr.Error("Upload a video or turn off Use Video Frames.")
+        return extract_video_frames(
+            video_path,
+            base_time,
+            frame_count,
+            spacing,
+            user_dir,
+            remove_background,
+            max_frames=5,
+            prefix="rodin_video",
+            progress=progress,
+        )
+
+    if image is None:
+        return []
+    prepared = prepare_rodin_image(image, remove_background, progress=progress)
+    return [save_api_image(prepared, os.path.join(user_dir, "rodin_input_01.png"))]
+
+
+def parse_optional_int(enabled: bool, value: Any) -> Optional[int]:
+    if not enabled:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise gr.Error("Quality Override must be an integer.")
+
+
+def model3d_path_or_none(path: Optional[str]) -> Optional[str]:
+    if path and path.lower().endswith(MODEL3D_SUPPORTED_EXTS):
+        return path
+    return None
 
 
 def hitem3d_resolution(model_label: str, speed_label: str) -> str:
@@ -809,6 +877,19 @@ def image_to_3d(
     rodin_remove_background: bool,
     rodin_use_original_alpha: bool,
     rodin_hd_texture: bool,
+    rodin25_tier: str,
+    rodin_geometry_file_format: str,
+    rodin_material: str,
+    rodin_use_quality_override: bool,
+    rodin_quality_override: int,
+    rodin_highpack: bool,
+    rodin_preview_render: bool,
+    rodin_texture_delight: bool,
+    rodin_texture_mode: str,
+    rodin_is_micro: bool,
+    rodin_is_symmetric: bool,
+    rodin_geometry_instruct_mode: str,
+    rodin_bbox_condition: str,
     ss_guidance_strength: float,
     ss_guidance_rescale: float,
     ss_sampling_steps: int,
@@ -824,7 +905,7 @@ def image_to_3d(
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> tuple:
-    if backend != HITEM3D_BACKEND and image is None:
+    if backend not in {HITEM3D_BACKEND, RODIN25_BACKEND} and image is None:
         raise gr.Error("Upload an image first.")
 
     if backend == HITEM3D_BACKEND:
@@ -866,6 +947,68 @@ def image_to_3d(
             'input_paths': image_paths,
         }
         return state, hitem3d_result_html(result.cover_path, result.task_id), result.glb_path
+
+    if backend == RODIN25_BACKEND:
+        api_key = get_rodin_api_key()
+        if not api_key:
+            raise gr.Error("Set HYPER3D_API_KEY or RODIN_API_KEY before using Rodin.")
+
+        user_dir = os.path.join(TMP_DIR, str(req.session_hash))
+        rodin_dir = os.path.join(user_dir, "rodin25")
+        image_paths = prepare_rodin_inputs(
+            image,
+            video,
+            hitem_video_saved_path,
+            hitem_use_video,
+            hitem_video_base_time,
+            hitem_video_frame_count,
+            hitem_video_frame_spacing,
+            rodin_remove_background,
+            rodin_dir,
+            progress=progress,
+        )
+        if not image_paths and not rodin_prompt.strip():
+            raise gr.Error("Upload an image/video or provide a prompt for Rodin Gen-2.5 text-to-3D.")
+
+        try:
+            result = generate_rodin_images_to_3d(
+                image_paths,
+                rodin_dir,
+                api_key,
+                prompt=rodin_prompt,
+                seed=seed,
+                tier=rodin25_tier,
+                quality=rodin_quality,
+                mesh_mode=rodin_mesh_mode,
+                tapose=rodin_tapose,
+                use_original_alpha=rodin_use_original_alpha,
+                geometry_file_format=rodin_geometry_file_format,
+                material=rodin_material,
+                quality_override=parse_optional_int(rodin_use_quality_override, rodin_quality_override),
+                addons=["HighPack"] if rodin_highpack else [],
+                preview_render=rodin_preview_render,
+                hd_texture=rodin_hd_texture,
+                texture_delight=rodin_texture_delight,
+                texture_mode=rodin_texture_mode,
+                is_micro=rodin_is_micro,
+                is_symmetric=rodin_is_symmetric,
+                geometry_instruct_mode=rodin_geometry_instruct_mode,
+                bbox_condition=rodin_bbox_condition,
+                progress=progress,
+            )
+        except RodinError as exc:
+            raise gr.Error(str(exc)) from exc
+
+        state = {
+            'backend': 'rodin',
+            'task_uuid': result.task_uuid,
+            'subscription_key': result.subscription_key,
+            'glb_path': result.glb_path,
+            'preview_path': result.preview_path,
+            'downloaded_files': result.downloaded_files,
+            'input_paths': image_paths,
+        }
+        return state, rodin_result_html(result.preview_path, result.task_uuid), model3d_path_or_none(result.glb_path)
 
     if backend == RODIN_BACKEND:
         api_key = get_rodin_api_key()
@@ -1036,8 +1179,9 @@ def extract_glb(
     if state.get('backend') in {'rodin', 'hitem3d'}:
         glb_path = state.get('glb_path')
         if not glb_path or not os.path.exists(glb_path):
-            raise gr.Error("Generated GLB is missing. Generate again.")
-        return glb_path, glb_path, glb_path
+            raise gr.Error("Generated asset is missing. Generate again.")
+        model_path = model3d_path_or_none(glb_path)
+        return model_path, model_path, glb_path
 
     trellis_pipeline, _ = get_trellis_pipeline()
     shape_slat, tex_slat, res = unpack_state(state)
@@ -1070,16 +1214,16 @@ def extract_glb(
 
 with gr.Blocks(delete_cache=(600, 600)) as demo:
     gr.Markdown("""
-    ## Image to 3D Asset with [TRELLIS.2](https://microsoft.github.io/TRELLIS.2), Rodin Gen-2, or Hitem3D
-    * Upload an image or Hitem3D video source and click Generate to create a 3D asset.
-    * Click Extract GLB to export and download the generated GLB file if you're satisfied with the result. Otherwise, try another time.
+    ## Image to 3D Asset with [TRELLIS.2](https://microsoft.github.io/TRELLIS.2), Rodin, or Hitem3D
+    * Upload an image or video source and click Generate to create a 3D asset.
+    * Click Extract Asset to export and download the generated asset if you're satisfied with the result. Otherwise, try another time.
     """)
     
     with gr.Row():
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
             hitem_video = gr.Video(label="Video Prompt", sources=["upload"], include_audio=True)
-            backend = gr.Radio([TRELLIS_BACKEND, RODIN_BACKEND, HITEM3D_BACKEND], label="Backend", value=TRELLIS_BACKEND)
+            backend = gr.Radio([TRELLIS_BACKEND, RODIN_BACKEND, RODIN25_BACKEND, HITEM3D_BACKEND], label="Backend", value=TRELLIS_BACKEND)
             
             resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
@@ -1087,26 +1231,41 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
 
+            with gr.Accordion(label="Video Settings", open=False):
+                hitem_use_video = gr.Checkbox(label="Use Video Frames", value=False)
+                hitem_video_base_time = gr.Slider(0.0, 60.0, label="Base Time (seconds)", value=0.0, step=0.05)
+                hitem_video_frame_count = gr.Slider(1, 5, label="Frame Count", value=4, step=1)
+                hitem_video_frame_spacing = gr.Slider(0.05, 1.0, label="Frame Spacing (seconds)", value=0.25, step=0.05)
+                hitem_video_preview = gr.Image(label="Base Frame Preview", type="pil", height=240, interactive=False)
+                hitem_video_status = gr.Textbox(label="Video Status", lines=1, interactive=False)
+
             with gr.Accordion(label="Hitem3D Settings", open=False):
                 hitem_model = gr.Radio(list(HITEM3D_MODELS.keys()), label="Model", value="Portrait v2.1")
                 hitem_speed = gr.Radio(["Fast", "Pro"], label="Resolution", value="Fast")
                 hitem_face_count = gr.Slider(100000, 2000000, label="Face Count", value=800000, step=100000)
                 hitem_remove_background = gr.Checkbox(label="Remove Background", value=True)
-                hitem_use_video = gr.Checkbox(label="Use Video Frames", value=False)
-                hitem_video_base_time = gr.Slider(0.0, 60.0, label="Base Time (seconds)", value=0.0, step=0.05)
-                hitem_video_frame_count = gr.Slider(1, 4, label="Frame Count", value=4, step=1)
-                hitem_video_frame_spacing = gr.Slider(0.05, 1.0, label="Frame Spacing (seconds)", value=0.25, step=0.05)
-                hitem_video_preview = gr.Image(label="Base Frame Preview", type="pil", height=240, interactive=False)
-                hitem_video_status = gr.Textbox(label="Video Status", lines=1, interactive=False)
 
             with gr.Accordion(label="Rodin Settings", open=False):
                 rodin_prompt = gr.Textbox(label="Prompt", lines=2, placeholder="Optional image guidance prompt")
+                rodin25_tier = gr.Radio(RODIN25_TIERS, label="Gen-2.5 Tier", value="Gen-2.5-High")
                 rodin_quality = gr.Radio(["medium", "high", "low", "extra-low"], label="Quality", value="medium")
-                rodin_mesh_mode = gr.Radio(["Quad", "Raw"], label="Mesh Mode", value="Quad")
+                rodin_mesh_mode = gr.Radio(["Raw", "Quad"], label="Mesh Mode", value="Raw")
+                rodin_geometry_file_format = gr.Radio(RODIN_GEOMETRY_FORMATS, label="Geometry Format", value="glb")
+                rodin_material = gr.Radio(RODIN_MATERIALS, label="Material", value="PBR")
+                rodin_use_quality_override = gr.Checkbox(label="Use Quality Override", value=False)
+                rodin_quality_override = gr.Slider(500, 2000000, label="Quality Override Faces", value=500000, step=500)
                 rodin_tapose = gr.Checkbox(label="T/A Pose", value=False)
                 rodin_remove_background = gr.Checkbox(label="Remove Background", value=True)
                 rodin_use_original_alpha = gr.Checkbox(label="Use Original Alpha", value=True)
+                rodin_highpack = gr.Checkbox(label="HighPack Addon", value=False)
+                rodin_preview_render = gr.Checkbox(label="Preview Render", value=True)
                 rodin_hd_texture = gr.Checkbox(label="HD Texture", value=False)
+                rodin_texture_delight = gr.Checkbox(label="Texture Delight", value=False)
+                rodin_texture_mode = gr.Radio(RODIN_TEXTURE_MODES, label="Texture Mode", value="high")
+                rodin_is_micro = gr.Checkbox(label="Micro Detail", value=False)
+                rodin_is_symmetric = gr.Checkbox(label="Symmetric", value=False)
+                rodin_geometry_instruct_mode = gr.Radio(RODIN_GEOMETRY_INSTRUCT_MODES, label="Geometry Instruct Mode", value="faithful")
+                rodin_bbox_condition = gr.Textbox(label="BBox Condition [Y,Z,X]", lines=1, placeholder="[50,80,50]")
             
             generate_btn = gr.Button("Generate")
                 
@@ -1138,10 +1297,10 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                             preview_output = gr.HTML(empty_html, label="3D Asset Preview", show_label=True, container=True)
                         with gr.Tab("Interactive GLB"):
                             preview_glb_output = gr.Model3D(label="Interactive GLB Preview", height=724, show_label=True, display_mode="solid", clear_color=(0.25, 0.25, 0.25, 1.0))
-                    extract_btn = gr.Button("Extract GLB")
+                    extract_btn = gr.Button("Extract Asset")
                 with gr.Step("Extract", id=1):
-                    glb_output = gr.Model3D(label="Extracted GLB", height=724, show_label=True, display_mode="solid", clear_color=(0.25, 0.25, 0.25, 1.0))
-                    download_btn = gr.DownloadButton(label="Download GLB")
+                    glb_output = gr.Model3D(label="Extracted Asset", height=724, show_label=True, display_mode="solid", clear_color=(0.25, 0.25, 0.25, 1.0))
+                    download_btn = gr.DownloadButton(label="Download Asset")
                     
         with gr.Column(scale=1, min_width=172):
             examples = gr.Examples(
@@ -1186,6 +1345,9 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             hitem_model, hitem_speed, hitem_face_count, hitem_remove_background,
             hitem_use_video, hitem_video_base_time, hitem_video_frame_count, hitem_video_frame_spacing,
             rodin_prompt, rodin_quality, rodin_mesh_mode, rodin_tapose, rodin_remove_background, rodin_use_original_alpha, rodin_hd_texture,
+            rodin25_tier, rodin_geometry_file_format, rodin_material, rodin_use_quality_override, rodin_quality_override,
+            rodin_highpack, rodin_preview_render, rodin_texture_delight, rodin_texture_mode, rodin_is_micro,
+            rodin_is_symmetric, rodin_geometry_instruct_mode, rodin_bbox_condition,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
