@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 import base64
 import io
+from html import escape as html_escape
 from hitem3d_api import (
     Hitem3DError,
     generate_images_to_3d as generate_hitem3d_images_to_3d,
@@ -985,7 +986,26 @@ def hitem3d_result_html(cover_path: Optional[str], task_id: str) -> str:
     """
 
 
-def api_result_html(provider: str, preview_path: Optional[str], task_id: str) -> str:
+def asset_status_markup(provider: str, task_id: str, asset_path: Optional[str]) -> str:
+    path_markup = ""
+    if asset_path:
+        size_markup = ""
+        try:
+            size_mb = os.path.getsize(asset_path) / (1024 * 1024)
+            size_markup = f" ({size_mb:.1f} MB)"
+        except OSError:
+            pass
+        path_markup = f"<p>GLB ready{size_markup}: <code>{html_escape(asset_path)}</code></p>"
+    return f"""
+        <div style="max-width: 760px; text-align:left; line-height:1.45;">
+            <p>{html_escape(provider)} task <code>{html_escape(task_id)}</code> completed.</p>
+            {path_markup}
+            <p>The interactive preview can take a moment to load large GLBs. The download button is ready as soon as the file path appears.</p>
+        </div>
+    """
+
+
+def api_result_html(provider: str, preview_path: Optional[str], task_id: str, asset_path: Optional[str] = None) -> str:
     if preview_path:
         try:
             preview_image = Image.open(preview_path)
@@ -997,9 +1017,9 @@ def api_result_html(provider: str, preview_path: Optional[str], task_id: str) ->
                      style="display:block; max-height:100%; object-fit:contain;">
             """
         except Exception:
-            preview_markup = f"<p>{provider} task {task_id} completed.</p>"
+            preview_markup = asset_status_markup(provider, task_id, asset_path)
     else:
-        preview_markup = f"<p>{provider} task {task_id} completed.</p>"
+        preview_markup = asset_status_markup(provider, task_id, asset_path)
 
     return f"""
     <div class="previewer-container">
@@ -1188,7 +1208,7 @@ def image_to_3d(
             provider = "Tripo P1 + Paid Mesh Repair"
         elif local_repair_status:
             provider = f"Tripo P1 + Local Mesh Repair ({local_repair_status})"
-        return state, api_result_html(provider, None, display_task_id), glb_path, preview_tab_for_model(glb_path)
+        return state, api_result_html(provider, None, display_task_id, glb_path), glb_path, preview_tab_for_model(glb_path), glb_path
 
     if backend == HITEM3D_BACKEND:
         if not has_hitem3d_credentials():
@@ -1228,7 +1248,7 @@ def image_to_3d(
             'cover_path': result.cover_path,
             'input_paths': image_paths,
         }
-        return state, hitem3d_result_html(result.cover_path, result.task_id), result.glb_path, preview_tab_for_model(result.glb_path)
+        return state, hitem3d_result_html(result.cover_path, result.task_id), result.glb_path, preview_tab_for_model(result.glb_path), result.glb_path
 
     if backend == RODIN25_BACKEND:
         api_key = get_rodin_api_key()
@@ -1292,7 +1312,7 @@ def image_to_3d(
             'input_paths': image_paths,
         }
         model3d_path = model3d_path_or_none(result.glb_path)
-        return state, rodin_result_html(result.preview_path, result.task_uuid), model3d_path, preview_tab_for_model(model3d_path)
+        return state, api_result_html("Rodin", result.preview_path, result.task_uuid, result.glb_path), model3d_path, preview_tab_for_model(model3d_path), result.glb_path
 
     if backend == RODIN_BACKEND:
         api_key = get_rodin_api_key()
@@ -1330,7 +1350,7 @@ def image_to_3d(
             'preview_path': result.preview_path,
             'downloaded_files': result.downloaded_files,
         }
-        return state, rodin_result_html(result.preview_path, result.task_uuid), result.glb_path, preview_tab_for_model(result.glb_path)
+        return state, api_result_html("Rodin", result.preview_path, result.task_uuid, result.glb_path), result.glb_path, preview_tab_for_model(result.glb_path), result.glb_path
 
     trellis_pipeline, trellis_envmap = get_trellis_pipeline()
 
@@ -1435,7 +1455,7 @@ def image_to_3d(
     </div>
     """
     
-    return state, full_html, None, gr.update(selected=SNAPSHOT_TAB)
+    return state, full_html, None, gr.update(selected=SNAPSHOT_TAB), None
 
 
 def extract_glb(
@@ -1610,6 +1630,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                         with gr.Tab("Interactive GLB", id=GLB_TAB):
                             preview_glb_output = gr.Model3D(label="Interactive GLB Preview", height=724, show_label=True, display_mode="solid", clear_color=(0.25, 0.25, 0.25, 1.0))
                     extract_btn = gr.Button("Extract Asset")
+                    preview_download_btn = gr.DownloadButton(label="Download Generated GLB", value=None)
                 with gr.Step("Extract", id=1):
                     glb_output = gr.Model3D(label="Extracted Asset", height=724, show_label=True, display_mode="solid", clear_color=(0.25, 0.25, 0.25, 1.0))
                     download_btn = gr.DownloadButton(label="Download Asset")
@@ -1670,7 +1691,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
         ],
-        outputs=[output_buf, preview_output, preview_glb_output, preview_tabs],
+        outputs=[output_buf, preview_output, preview_glb_output, preview_tabs, preview_download_btn],
     )
     
     extract_btn.click(
