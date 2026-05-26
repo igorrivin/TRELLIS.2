@@ -777,6 +777,7 @@ def prepare_hitem3d_inputs(
 
 def prepare_rodin_inputs(
     image: Optional[Image.Image],
+    multiview_images: Any,
     video: Any,
     saved_video_path: str,
     use_video: bool,
@@ -802,6 +803,21 @@ def prepare_rodin_inputs(
             prefix="rodin_video",
             progress=progress,
         )
+
+    upload_paths = get_uploaded_file_paths(multiview_images)
+    missing_upload_paths = [path for path in upload_paths if not os.path.exists(path)]
+    if missing_upload_paths:
+        raise gr.Error("One or more uploaded Rodin multiview images are no longer available. Re-upload the multiview images.")
+    if len(upload_paths) > 5:
+        raise gr.Error(f"Rodin supports at most 5 multiview images; got {len(upload_paths)} distinct files.")
+    if upload_paths:
+        paths = []
+        for source_path in upload_paths:
+            with Image.open(source_path) as uploaded:
+                prepared = prepare_rodin_image(uploaded.convert("RGBA"), remove_background, progress=progress)
+            index = len(paths) + 1
+            paths.append(save_api_image(prepared, os.path.join(user_dir, f"rodin_input_{index:02d}.png")))
+        return paths
 
     if image is None:
         return []
@@ -997,6 +1013,7 @@ def api_result_html(provider: str, preview_path: Optional[str], task_id: str) ->
 def image_to_3d(
     image: Optional[Image.Image],
     tripo_multiview_images: Any,
+    rodin_multiview_images: Any,
     video: Any,
     hitem_video_saved_path: str,
     backend: str,
@@ -1222,6 +1239,7 @@ def image_to_3d(
         rodin_dir = os.path.join(user_dir, "rodin25")
         image_paths = prepare_rodin_inputs(
             image,
+            rodin_multiview_images,
             video,
             hitem_video_saved_path,
             hitem_use_video,
@@ -1512,14 +1530,15 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 hitem_remove_background = gr.Checkbox(label="Remove Background", value=True)
 
             with gr.Accordion(label="Rodin Settings", open=False):
+                rodin_multiview_images = gr.File(label="Rodin Multiview Images (up to 5)", file_count="multiple", file_types=["image"], type="filepath")
                 rodin_prompt = gr.Textbox(label="Prompt", lines=2, placeholder="Optional image guidance prompt")
-                rodin25_tier = gr.Radio(RODIN25_TIERS, label="Gen-2.5 Tier", value="Gen-2.5-High")
-                rodin_quality = gr.Radio(["medium", "high", "low", "extra-low"], label="Quality", value="medium")
+                rodin25_tier = gr.Radio(RODIN25_TIERS, label="Gen-2.5 Tier / Detail Level", value="Gen-2.5-High")
+                rodin_quality = gr.Radio(["medium", "high", "low", "extra-low"], label="Mesh Face Preset", value="medium")
                 rodin_mesh_mode = gr.Radio(["Raw", "Quad"], label="Mesh Mode", value="Raw")
                 rodin_geometry_file_format = gr.Radio(RODIN_GEOMETRY_FORMATS, label="Geometry Format", value="glb")
                 rodin_material = gr.Radio(RODIN_MATERIALS, label="Material", value="PBR")
-                rodin_use_quality_override = gr.Checkbox(label="Use Quality Override", value=False)
-                rodin_quality_override = gr.Slider(500, 2000000, label="Quality Override Faces", value=500000, step=500)
+                rodin_use_quality_override = gr.Checkbox(label="Use Face Count Override", value=False)
+                rodin_quality_override = gr.Slider(500, 2000000, label="Face Count Override", value=500000, step=500)
                 rodin_tapose = gr.Checkbox(label="T/A Pose", value=False)
                 rodin_remove_background = gr.Checkbox(label="Remove Background", value=True)
                 rodin_use_original_alpha = gr.Checkbox(label="Use Original Alpha", value=True)
@@ -1634,7 +1653,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     ).then(
         image_to_3d,
         inputs=[
-            image_prompt, tripo_multiview_images, hitem_video, hitem_video_path_state, backend, seed, resolution,
+            image_prompt, tripo_multiview_images, rodin_multiview_images, hitem_video, hitem_video_path_state, backend, seed, resolution,
             hitem_model, hitem_speed, hitem_face_count, hitem_remove_background,
             hitem_use_video, hitem_video_base_time, hitem_video_frame_count, hitem_video_frame_spacing,
             rodin_prompt, rodin_quality, rodin_mesh_mode, rodin_tapose, rodin_remove_background, rodin_use_original_alpha, rodin_hd_texture,
